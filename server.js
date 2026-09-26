@@ -30,6 +30,49 @@ function item(it) {
 	return { id, title: it.title || "", thumb: "/api/jetstream/img?u=" + b64(it.thumbnail || ""), dur: fmtDur(it.duration), uploader: it.uploaderName || it.uploader || "", views: it.views || it.viewCount || 0 };
 }
 
+
+// when piped instances get bot-checked on /streams, fall back to YouTube's own
+// innertube ANDROID client - the server can talk to youtube directly; only the
+// CLIENT must never see a google domain (that stays true: bytes are re-proxied).
+const INNERTUBE_KEYS = (process.env.JETSTREAM_INNERTUBE_KEYS || "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8,AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w").split(",").map((s) => s.trim()).filter(Boolean);
+const INNERTUBE_UA = "com.google.android.youtube/20.10.38 (Linux; U; Android 11) gzip";
+async function innertube(videoId) {
+	let lastErr = null;
+	for (const key of INNERTUBE_KEYS) {
+		try {
+			const r = await fetch("https://www.youtube.com/youtubei/v1/player?key=" + key, {
+				method: "POST",
+				headers: { "content-type": "application/json", "user-agent": INNERTUBE_UA },
+				body: JSON.stringify({ context: { client: { clientName: "ANDROID", clientVersion: "20.10.38", androidSdkVersion: 30, hl: "en" } }, videoId }),
+				signal: AbortSignal.timeout(12000),
+			});
+			if (!r.ok) { lastErr = new Error("innertube " + r.status); continue; }
+			const d = await r.json();
+			if (d.playabilityStatus && d.playabilityStatus.status !== "OK") { lastErr = new Error("unplayable: " + d.playabilityStatus.status); continue; }
+			return d;
+		} catch (e) { lastErr = e; }
+	}
+	throw lastErr || new Error("innertube failed");
+}
+async function watchViaInnertube(v) {
+	const d = await innertube(v);
+	const vd = d.videoDetails || {};
+	const streams = ((d.streamingData && d.streamingData.formats) || [])
+		.filter((s) => s && s.url && /video\/mp4/.test(s.mimeType || "") && /\d+p/.test(s.qualityLabel || ""))
+		.sort((a, b) => (b.height || 0) - (a.height || 0))
+		.slice(0, 3)
+		.map((s) => ({ q: s.qualityLabel, src: "/api/jetstream/stream?u=" + b64(s.url) }));
+	// hqdefault always exists (maxres 404s on plenty of videos)
+	const thumbUrl = "https://i.ytimg.com/vi/" + v + "/hqdefault.jpg";
+	// best-effort related via piped search on the uploader; fine if it fails
+	let related = [];
+	try {
+		const d2 = await api("/search?q=" + encodeURIComponent(vd.author || "") + "&filter=videos");
+		related = (d2 && Array.isArray(d2.items) ? d2.items : []).filter((x) => x && x.type === "stream" && x.url && !x.url.includes(v)).slice(0, 18).map(item);
+	} catch (e) {}
+	return { ok: true, id: v, title: vd.title || "", uploader: vd.author || "", thumb: "/api/jetstream/img?u=" + b64(thumbUrl), dur: fmtDur(vd.lengthSeconds), views: Number(vd.viewCount) || 0, likes: 0, uploaded: "", description: String(vd.shortDescription || "").slice(0, 2000), streams, related, live: !!vd.isLiveContent };
+}
+
 export default async function handle(req, res, route, url, ctx) {
 	if (!ctx.user) { json(res, 401, { error: "no session" }); return; }
 	try {
@@ -47,6 +90,9 @@ export default async function handle(req, res, route, url, ctx) {
 		if (route === "watch" && req.method === "GET") {
 			const v = (url.searchParams.get("v") || "").trim();
 			if (!/^[a-zA-Z0-9_-]{11}$/.test(v)) return json(res, 400, { error: "bad video id" });
+			try {
+				return json(res, 200, await watchViaInnertube(v));
+			} catch (e) {}
 			const d = await api("/streams/" + v);
 			const streams = (d.videoStreams || [])
 				.filter((s) => s && s.url && s.videoOnly === false && /\d+p/.test(s.quality || ""))
