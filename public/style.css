@@ -167,3 +167,11 @@ button.plain:hover { border-color: var(--amber-deep); }
 .pliteminfo b{font-size:13.5px;font-weight:600;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .pliteminfo .dim{font-size:12px}
 .dur.live{color:#ff7070;font-weight:700;letter-spacing:.04em}
+.cmts{padding:2px 2px 8px}
+.cmt{display:flex;gap:10px;padding:8px 2px}
+.cmtavatar{width:32px;height:32px;border-radius:50%;object-fit:cover;flex:none;background:#1a1d22}
+.cmtbody{min-width:0}
+.cmtmeta{margin:0 0 3px;font-size:12.5px}
+.cmtpin{color:var(--amber);font-size:11px;font-weight:700;margin-left:6px;text-transform:uppercase;letter-spacing:.04em}
+.cmttext{margin:0;font-size:13.5px;line-height:1.45;white-space:pre-wrap;word-break:break-word}
+.wsubrow .plain{white-space:nowrap}

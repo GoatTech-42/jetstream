@@ -34,7 +34,7 @@ function applyRamjetTheme() {
 }
 applyRamjetTheme();
 
-let store = { history: [], progress: {}, settings: { ...DEFAULT_SETTINGS }, subs: [] };
+let store = { history: [], progress: {}, settings: { ...DEFAULT_SETTINGS }, subs: [], later: [] };
 let saveQueued = false;
 // play-all queue (channel pages, playlists) - lives only in this page session
 let queue = null; // { label, items: [{id,title,...}], }
@@ -70,6 +70,7 @@ function norm(s) {
 		progress: s.progress || {},
 		settings: { ...DEFAULT_SETTINGS, ...(s.settings || {}) },
 		subs: Array.isArray(s.subs) ? s.subs : [],
+		later: Array.isArray(s.later) ? s.later : [],
 	};
 }
 function loadLocal() {
@@ -96,7 +97,7 @@ function save() {
 		if (typeof RJCrypto === "undefined" || !RJCrypto.unlocked()) return;
 		try {
 			const blob = (await RJCrypto.pull()) || {};
-			blob.jetstream = { history: store.history.slice(0, 40), progress: store.progress, settings: store.settings, subs: store.subs };
+			blob.jetstream = { history: store.history.slice(0, 40), progress: store.progress, settings: store.settings, subs: store.subs, later: store.later.slice(0, 60) };
 			await RJCrypto.push(blob);
 		} catch (e) {}
 	}, 1200);
@@ -120,6 +121,13 @@ function isSubbed(name) { return store.subs.some((s) => s.name.toLowerCase() ===
 function toggleSub(name, chId) {
 	if (isSubbed(name)) store.subs = store.subs.filter((s) => s.name.toLowerCase() !== name.toLowerCase());
 	else store.subs.unshift({ name, chId: chId || "", at: Date.now() });
+	save();
+}
+
+function isLater(id) { return store.later.some((x) => x.id === id); }
+function toggleLater(v) {
+	if (isLater(v.id)) store.later = store.later.filter((x) => x.id !== v.id);
+	else store.later.unshift({ id: v.id, title: v.title, uploader: v.uploader || "", thumb: v.thumb || "", dur: v.dur || "", at: Date.now() });
 	save();
 }
 
@@ -288,6 +296,37 @@ async function showPlaylist(id) {
 	if (vids.length) idle(() => setTimeout(() => prefetch("watch?v=" + vids[0].id), 600));
 }
 
+// -- comments -------------------------------------------------------------------
+const commentsCache = {};
+function fetchComments(id) {
+	if (!commentsCache[id]) commentsCache[id] = api("comments?v=" + encodeURIComponent(id)).catch(() => null);
+	return commentsCache[id];
+}
+function commentRow(c) {
+	return `<div class="cmt">
+		${c.avatar ? `<img class="cmtavatar" loading="lazy" src="${esc(c.avatar)}" alt="">` : '<span class="cmtavatar"></span>'}
+		<div class="cmtbody">
+			<p class="cmtmeta"><b>${esc(c.author)}</b>${c.pinned ? '<span class="cmtpin">pinned</span>' : ""} <span class="dim">${esc([c.time, c.likes].filter(Boolean).join(" · "))}</span></p>
+			<p class="cmttext">${esc(c.text)}</p>
+		</div>
+	</div>`;
+}
+async function fillComments(id) {
+	const box = document.getElementById("cmts");
+	if (!box) return;
+	const d = await fetchComments(id);
+	const el = document.getElementById("cmts");
+	if (!el) return;
+	if (!d) { el.innerHTML = '<p class="dim" style="margin:6px 2px">comments won\'t load right now.</p>'; return; }
+	el.innerHTML = d.comments.length ? d.comments.map(commentRow).join("") : '<p class="dim" style="margin:6px 2px">no comments on this one.</p>';
+	const sum = document.getElementById("cmtsummary");
+	if (sum && d.count) sum.textContent = "comments (" + d.count + ")";
+	if (d.likes) {
+		const lm = document.getElementById("likemeta");
+		if (lm) lm.textContent = " · " + d.likes + " likes";
+	}
+}
+
 async function showWatch(id) {
 	setTab("");
 	view.innerHTML = '<div class="watch"><div class="skel-player"></div><div class="skel-line" style="margin:14px 2px"></div><div class="skel-line short" style="margin:0 2px"></div></div>';
@@ -315,11 +354,13 @@ async function showWatch(id) {
 		${qChip}
 		<p class="wtitle">${esc(d.title)}</p>
 		<div class="wsubrow">
-			<p class="wmeta" style="margin:0"><a class="uplink" href="${upLink}">${esc(d.uploader)}</a>${metaBits ? " · " + esc(metaBits) : ""}</p>
+			<p class="wmeta" style="margin:0"><a class="uplink" href="${upLink}">${esc(d.uploader)}</a>${metaBits ? " · " + esc(metaBits) : ""}<span id="likemeta"></span></p>
+			<button class="plain" id="laterbtn">${isLater(d.id) ? "saved" : "later"}</button>
 			<button class="plain subbtn${subbed ? " on" : ""}" id="subbtn">${subbed ? "subscribed" : "subscribe"}</button>
 		</div>
 		${hasStreams && d.streams.length > 1 ? `<div class="wrow"><label class="dim" for="qual">quality</label><select class="quality" id="qual">${d.streams.map((s, i) => `<option value="${i}"${i === startIdx ? " selected" : ""}>${esc(s.q)}</option>`).join("")}</select></div>` : ""}
 		${d.description ? `<details class="desc"><summary>description</summary><pre>${esc(d.description)}</pre></details>` : ""}
+		${hasStreams ? '<details class="desc" id="cmtdetails"><summary id="cmtsummary">comments</summary><div class="cmts" id="cmts"><p class="dim" style="margin:6px 2px">loading comments...</p></div></details>' : ""}
 		${d.related && d.related.length ? '<h2 class="sec">up next</h2>' : ""}
 	</div>` + grid(store.settings.algo ? rankItems(d.related || []) : (d.related || []));
 	document.getElementById("subbtn").addEventListener("click", () => {
@@ -329,12 +370,26 @@ async function showWatch(id) {
 		b.textContent = on ? "subscribed" : "subscribe";
 		b.classList.toggle("on", on);
 	});
+	document.getElementById("laterbtn").addEventListener("click", () => {
+		toggleLater({ id: d.id, title: d.title, uploader: d.uploader, thumb: d.thumb || "", dur: d.dur });
+		document.getElementById("laterbtn").textContent = isLater(d.id) ? "saved" : "later";
+	});
+	const cdt = document.getElementById("cmtdetails");
+	if (cdt) cdt.addEventListener("toggle", () => { if (cdt.open) fillComments(d.id); });
 	if (hasStreams) wirePlayer(d, resume);
 	// warm the next things he's likely to tap
 	idle(() => {
 		const nxt = queueNext(d.id) || ((d.related || [])[0]);
 		if (nxt) prefetch("watch?v=" + nxt.id);
 		if (d.chId) setTimeout(() => prefetch("channel?id=" + encodeURIComponent(d.chId)), 900);
+		if (!rjLowData) setTimeout(() => fetchComments(d.id).then((c) => {
+			if (!c) return;
+			const sum = document.getElementById("cmtsummary");
+			if (sum && c.count) sum.textContent = "comments (" + c.count + ")";
+			const lm = document.getElementById("likemeta");
+			if (lm && c.likes) lm.textContent = " · " + c.likes + " likes";
+			if (cdt && cdt.open) fillComments(d.id);
+		}), 1600);
 	});
 }
 
@@ -369,8 +424,14 @@ function wirePlayer(d, resume) {
 
 function showHistory() {
 	setTab("history");
+	const laterRows = store.later.map((v) => `<div class="subrow">
+		<a class="subname" href="#/w/${esc(v.id)}">${esc(v.title)}</a>
+		<button class="plain" data-unlater="${esc(v.id)}">remove</button>
+	</div>`).join("");
+	const laterHtml = store.later.length ? `<h2 class="sec pad" style="padding-bottom:0">watch later (${store.later.length})</h2><div class="subs">${laterRows}</div>` : "";
 	if (!store.history.length) {
-		view.innerHTML = '<p class="dim pad">nothing watched yet.</p>';
+		view.innerHTML = laterHtml || '<p class="dim pad">nothing watched yet.</p>';
+		for (const b of document.querySelectorAll("[data-unlater]")) b.addEventListener("click", () => { store.later = store.later.filter((x) => x.id !== b.dataset.unlater); save(); showHistory(); });
 		return;
 	}
 	const items = store.history.map((h) => {
@@ -381,8 +442,9 @@ function showHistory() {
 			progressPct: p && h.durSec ? Math.round((p / h.durSec) * 100) : 0,
 		};
 	});
-	view.innerHTML = `<h2 class="sec pad" style="padding-bottom:0">watch history</h2>` + grid(items) +
+	view.innerHTML = laterHtml + `<h2 class="sec pad" style="padding-bottom:0">watch history</h2>` + grid(items) +
 		`<div class="pad"><button class="plain" id="wipe">clear history</button></div>`;
+	for (const b of document.querySelectorAll("[data-unlater]")) b.addEventListener("click", () => { store.later = store.later.filter((x) => x.id !== b.dataset.unlater); save(); showHistory(); });
 	document.getElementById("wipe").addEventListener("click", () => {
 		store.history = []; store.progress = {}; save(); showHistory();
 	});

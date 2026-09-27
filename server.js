@@ -123,6 +123,81 @@ function lockupItem(l) {
 	for (const b of walkAll(l.contentImage, "thumbnailBadgeViewModel")) { if (/\d+:\d\d/.test(b.text || "")) { dur = b.text; break; } }
 	return { id: l.contentId, title, thumb: thumbFor(l.contentId), dur, metaText: parts.join(" · ") };
 }
+// the WEB "next" endpoint carries likes + the comments section continuation
+async function innertubeNext(body) {
+	let lastErr = null;
+	for (const key of INNERTUBE_KEYS) {
+		try {
+			const r = await fetch("https://www.youtube.com/youtubei/v1/next?key=" + key, {
+				method: "POST",
+				headers: { "content-type": "application/json", "user-agent": WEB_UA },
+				body: JSON.stringify({ context: { client: { clientName: "WEB", clientVersion: "2.20240926.00.00", hl: "en" } }, ...body }),
+				signal: AbortSignal.timeout(15000),
+			});
+			if (!r.ok) { lastErr = new Error("next " + r.status); continue; }
+			const d = await r.json();
+			if (d && d.error) { lastErr = new Error("next: " + (d.error.message || "error")); continue; }
+			return d;
+		} catch (e) { lastErr = e; }
+	}
+	throw lastErr || new Error("next failed");
+}
+function findCommentsToken(d) {
+	let token = null;
+	(function walk(o) {
+		if (token || !o || typeof o !== "object") return;
+		if (o.itemSectionRenderer && /comment/i.test(o.itemSectionRenderer.sectionIdentifier || "")) {
+			const toks = walkAll(o, "continuationCommand");
+			if (toks.length && toks[0].token) { token = toks[0].token; return; }
+		}
+		for (const k in o) walk(o[k]);
+	})(d);
+	return token;
+}
+async function commentsFor(v) {
+	const first = await innertubeNext({ videoId: v });
+	// video like count lives on the like button's a11y label
+	let likes = "";
+	try {
+		const s = JSON.stringify(walkAll(first, "segmentedLikeDislikeButtonViewModel")[0] || {});
+		const m = /along with ([\d,]+(?:\.\d+)?[KMB]?) other/i.exec(s) || /([\d,]+(?:\.\d+)?[KMB]?) likes/i.exec(s);
+		if (m) likes = m[1];
+	} catch (e) {}
+	let count = "";
+	const cm = /"([\d,]+) Comments"/.exec(JSON.stringify(first));
+	if (cm) count = cm[1];
+	const comments = [];
+	const token = findCommentsToken(first);
+	if (token) {
+		const d = await innertubeNext({ continuation: token });
+		const byKey = new Map();
+		const muts = (d.frameworkUpdates && d.frameworkUpdates.entityBatchUpdate && d.frameworkUpdates.entityBatchUpdate.mutations) || [];
+		for (const m of muts) {
+			const pl = m.payload && m.payload.commentEntityPayload;
+			if (pl) byKey.set(pl.key, pl);
+		}
+		const seen = new Set();
+		const emit = (key, pinned) => {
+			const pl = byKey.get(key);
+			if (!pl || seen.has(key)) return;
+			seen.add(key);
+			comments.push({
+				author: (pl.author && pl.author.displayName) || "",
+				avatar: pl.author && pl.author.avatarThumbnailUrl ? "/api/jetstream/img?u=" + b64(pl.author.avatarThumbnailUrl) : "",
+				text: (pl.properties && pl.properties.content && pl.properties.content.content) || "",
+				likes: (pl.toolbar && pl.toolbar.likeCountA11y) || "",
+				time: (pl.properties && pl.properties.publishedTime) || "",
+				pinned: !!pinned,
+			});
+		};
+		for (const t of walkAll(d, "commentThreadRenderer")) {
+			const inner = t.commentViewModel && t.commentViewModel.commentViewModel;
+			if (inner && inner.commentKey) emit(inner.commentKey, !!inner.pinnedText);
+		}
+		if (!comments.length) for (const k of byKey.keys()) emit(k, false);
+	}
+	return { ok: true, count, likes, comments: comments.slice(0, 20) };
+}
 async function watchViaInnertube(v) {
 	const d = await innertube(v);
 	const vd = d.videoDetails || {};
@@ -229,6 +304,11 @@ export default async function handle(req, res, route, url, ctx) {
 				.map((s) => ({ q: s.quality, src: "/api/jetstream/stream?u=" + b64(s.url) }));
 			const related = (d.relatedStreams || []).filter((x) => x && x.url).slice(0, 18).map(item);
 			return json(res, 200, { ok: true, id: v, title: d.title || "", uploader: d.uploader || "", thumb: "/api/jetstream/img?u=" + b64(d.thumbnailUrl || ""), dur: fmtDur(d.duration), views: d.views || 0, likes: d.likes || 0, uploaded: d.uploadDate || "", description: String(d.description || "").slice(0, 2000), streams, related, live: !!d.livestream, vertical: false });
+		}
+		if (route === "comments" && req.method === "GET") {
+			const v = (url.searchParams.get("v") || "").trim();
+			if (!/^[a-zA-Z0-9_-]{11}$/.test(v)) return json(res, 400, { error: "bad video id" });
+			return json(res, 200, await cached("comments:" + v, 10 * 60 * 1000, () => commentsFor(v)), req);
 		}
 		if ((route === "stream" || route === "img") && req.method === "GET") {
 			const u = unb64(url.searchParams.get("u") || "");
