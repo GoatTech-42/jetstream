@@ -53,17 +53,64 @@ function item(it) {
 	const live = it.duration === -1 || it.livestream === true;
 	return { id, title: it.title || "", thumb: thumbFor(id), dur: secs > 0 ? fmtDur(secs) : "", uploader: it.uploaderName || it.uploader || "", chId, views: it.views || it.viewCount || 0, live };
 }
-// live streams can't play through jetstream - drop them from listings, but
-// never filter a page down to nothing (saturday trending is mostly live games)
+// live streams can't play through jetstream - hide them everywhere (Luke's call, v1.6)
 function preferPlayable(items) {
-	const playable = items.filter((x) => !x.live);
-	return playable.length >= 8 ? playable : items;
+	return items.filter((x) => !x.live);
 }
 
 
 // when piped instances get bot-checked on /streams, fall back to YouTube's own
 // innertube clients - the server can talk to youtube directly; only the CLIENT
 // must never see a google domain (that stays true: bytes are re-proxied).
+// -- innertube WEB search: youtube's own ranked order, continuation tokens, shorts filter --
+function searchItems(d) {
+	const out = [], shorts = [];
+	for (const vr of walkAll(d, "videoRenderer")) {
+		const id = vr.videoId || "";
+		if (!/^[a-zA-Z0-9_-]{11}$/.test(id)) continue;
+		let live = false, dur = "";
+		if (vr.lengthText && vr.lengthText.simpleText) dur = vr.lengthText.simpleText;
+		else live = true; // no length text = live/upcoming
+		for (const b of vr.badges || []) { if (/live/i.test((b.metadataBadgeRenderer && b.metadataBadgeRenderer.label) || "")) live = true; }
+		if (live) continue;
+		const title = ((vr.title && vr.title.runs) || [])[0];
+		const ch = ((vr.ownerText && vr.ownerText.runs) || [])[0];
+		let chId = "";
+		try { chId = ch.navigationEndpoint.browseEndpoint.browseId || ""; } catch (e) {}
+		let views = 0;
+		const vt = (vr.viewCountText && vr.viewCountText.simpleText) || "";
+		const vm = /([\d.,]+)\s*([KM])?\s*views/i.exec(vt);
+		if (vm) { views = parseFloat(vm[1].replace(/,/g, "")); if (vm[2] === "K") views *= 1e3; if (vm[2] === "M") views *= 1e6; }
+		out.push({ id, title: (title && title.text) || "", thumb: thumbFor(id), dur, uploader: (ch && ch.text) || "", chId, views: Math.round(views), live: false });
+	}
+	for (const sl of walkAll(d, "shortsLockupViewModel")) {
+		const m = /shorts-shelf-item-([a-zA-Z0-9_-]{11})/.exec(sl.entityId || "");
+		if (!m) continue;
+		const t = String(sl.accessibilityText || "").replace(/, [\d.,]+ ?[a-z]* views? - play Short.*$/i, "");
+		shorts.push({ id: m[1], title: t, short: true, thumb: thumbFor(m[1]) });
+	}
+	let cont = "";
+	for (const c of walkAll(d, "continuationCommand")) { if (c && c.token) { cont = c.token; break; } }
+	return { items: out, shorts, cont };
+}
+async function innertubeSearch(body) {
+	let lastErr = null;
+	for (const key of INNERTUBE_KEYS) {
+		try {
+			const r = await fetch("https://www.youtube.com/youtubei/v1/search?key=" + key, {
+				method: "POST",
+				headers: { "content-type": "application/json", "user-agent": WEB_UA },
+				body: JSON.stringify({ context: { client: { clientName: "WEB", clientVersion: "2.20240926.00.00", hl: "en" } }, ...body }),
+				signal: AbortSignal.timeout(15000),
+			});
+			if (!r.ok) { lastErr = new Error("search " + r.status); continue; }
+			const d = await r.json();
+			if (d && d.error) { lastErr = new Error("search: " + (d.error.message || "error")); continue; }
+			return d;
+		} catch (e) { lastErr = e; }
+	}
+	throw lastErr || new Error("innertube search failed");
+}
 const INNERTUBE_KEYS = (process.env.JETSTREAM_INNERTUBE_KEYS || "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8,AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w").split(",").map((s) => s.trim()).filter(Boolean);
 const INNERTUBE_UA = "com.google.android.youtube/20.10.38 (Linux; U; Android 11) gzip";
 const WEB_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0 Safari/537.36";
@@ -139,9 +186,13 @@ function lockupItem(l) {
 	const rows = (md && md.metadata && md.metadata.contentMetadataViewModel && md.metadata.contentMetadataViewModel.metadataRows) || [];
 	const parts = [];
 	for (const r of rows) for (const p of r.metadataParts || []) { if (p.text && p.text.content) parts.push(p.text.content); }
-	let dur = "";
-	for (const b of walkAll(l.contentImage, "thumbnailBadgeViewModel")) { if (/\d+:\d\d/.test(b.text || "")) { dur = b.text; break; } }
-	return { id: l.contentId, title, thumb: thumbFor(l.contentId), dur, metaText: parts.join(" · ") };
+	let dur = "", live = false;
+	for (const b of walkAll(l.contentImage, "thumbnailBadgeViewModel")) {
+		const t = b.text || "";
+		if (/\d+:\d\d/.test(t)) { dur = t; break; }
+		if (/^\s*live\s*$/i.test(t)) live = true;
+	}
+	return { id: l.contentId, title, thumb: thumbFor(l.contentId), dur, metaText: parts.join(" · "), live };
 }
 // the WEB "next" endpoint carries likes + the comments section continuation
 async function innertubeNext(body) {
@@ -261,7 +312,7 @@ async function watchViaInnertube(v) {
 	let related = [];
 	try {
 		const d2 = await api("/search?q=" + encodeURIComponent(vd.author || "") + "&filter=videos");
-		related = (d2 && Array.isArray(d2.items) ? d2.items : []).filter((x) => x && x.type === "stream" && x.url && !x.url.includes(v)).slice(0, 18).map(item);
+		related = (d2 && Array.isArray(d2.items) ? d2.items : []).filter((x) => x && x.type === "stream" && x.url && !x.url.includes(v)).slice(0, 18).map(item).filter((x) => !x.live);
 	} catch (e) {}
 	return { ok: true, id: v, title: vd.title || "", uploader: vd.author || "", chId: vd.channelId || "", thumb: "/api/jetstream/img?u=" + b64(thumbUrl), dur: fmtDur(vd.lengthSeconds), views: Number(vd.viewCount) || 0, likes: 0, uploaded: "", description: String(vd.shortDescription || "").slice(0, 2000), streams, related, live: !!vd.isLiveContent, vertical, captions };
 }
@@ -275,10 +326,36 @@ export default async function handle(req, res, route, url, ctx) {
 		}
 		if (route === "search" && req.method === "GET") {
 			const q = (url.searchParams.get("q") || "").trim();
-			if (!q) return json(res, 400, { error: "missing q" });
-			const d = await cachedApi("/search?q=" + encodeURIComponent(q) + "&filter=videos", 5 * 60 * 1000);
-			const items = (d && Array.isArray(d.items) ? d.items : []).filter((x) => x && x.type === "stream" && x.url).map(item);
-			return json(res, 200, { ok: true, items: preferPlayable(items) }, req);
+			const cont = (url.searchParams.get("cont") || "").trim();
+			const wantShorts = url.searchParams.get("filter") === "shorts";
+			if (!q && !cont) return json(res, 400, { error: "missing q" });
+			try {
+				const body = cont ? { continuation: cont } : { query: q, params: wantShorts ? "EgIYAQ==" : "EgIQAQ==" };
+				const d = await cached("ytsearch:" + (cont || q + ":" + (wantShorts ? "s" : "v")), 10 * 60 * 1000, () => innertubeSearch(body));
+				const r = searchItems(d);
+				return json(res, 200, { ok: true, items: wantShorts ? r.shorts : r.items, continuation: r.cont }, req);
+			} catch (e) {
+				if (cont || wantShorts) throw e;
+				const d = await cachedApi("/search?q=" + encodeURIComponent(q) + "&filter=videos", 5 * 60 * 1000);
+				const items = (d && Array.isArray(d.items) ? d.items : []).filter((x) => x && x.type === "stream" && x.url).map(item);
+				return json(res, 200, { ok: true, items: preferPlayable(items), continuation: "" }, req);
+			}
+		}
+		if (route === "suggest" && req.method === "GET") {
+			const q = (url.searchParams.get("q") || "").trim();
+			if (!q || q.length > 80) return json(res, 200, { ok: true, items: [] }, req);
+			let items = [];
+			try {
+				items = await cached("sug:" + q.toLowerCase(), 30 * 60 * 1000, async () => {
+					// youtube's own suggest endpoint - server-side only, the client never sees a google domain
+					const r = await fetch("https://suggestqueries.google.com/complete/search?client=youtube&ds=yt&hl=en&q=" + encodeURIComponent(q), { headers: { "user-agent": WEB_UA }, signal: AbortSignal.timeout(8000) });
+					if (!r.ok) throw new Error("suggest " + r.status);
+					const txt = await r.text();
+					const arr = JSON.parse(txt.slice(txt.indexOf("(") + 1, txt.lastIndexOf(")")));
+					return (arr[1] || []).map((x) => (Array.isArray(x) ? x[0] : x)).filter((x) => typeof x === "string").slice(0, 7);
+				});
+			} catch (e) {}
+			return json(res, 200, { ok: true, items }, req);
 		}
 		if (route === "search-channels" && req.method === "GET") {
 			const q = (url.searchParams.get("q") || "").trim();
@@ -334,7 +411,8 @@ export default async function handle(req, res, route, url, ctx) {
 				const t = String(s.accessibilityText || "").replace(/, [\d.,]+ ?[a-z]* views? - play Short.*$/i, "");
 				shorts.push({ id: m[1], title: t, short: true, thumb: thumbFor(m[1]) });
 			}
-			return json(res, 200, { ok: true, id, name: meta.title || (phv && phv.title && phv.title.dynamicTextViewModel && phv.title.dynamicTextViewModel.text && phv.title.dynamicTextViewModel.text.content) || "", description: String(meta.description || "").slice(0, 600), subs: mtexts.join(" · "), avatar, videos: videos.slice(0, 30), shorts: shorts.slice(0, 20), playlists: pls.slice(0, 12) }, req);
+			const pvids = videos.filter((x) => !x.live);
+			return json(res, 200, { ok: true, id, name: meta.title || (phv && phv.title && phv.title.dynamicTextViewModel && phv.title.dynamicTextViewModel.text && phv.title.dynamicTextViewModel.text.content) || "", description: String(meta.description || "").slice(0, 600), subs: mtexts.join(" · "), avatar, videos: pvids.slice(0, 30), shorts: shorts.slice(0, 20), playlists: pls.slice(0, 12) }, req);
 		}
 		if (route === "playlist" && req.method === "GET") {
 			const id = (url.searchParams.get("id") || "").trim();
@@ -347,7 +425,7 @@ export default async function handle(req, res, route, url, ctx) {
 				const it = lockupItem(l);
 				if (it && !seen.has(it.id)) { seen.add(it.id); videos.push(it); }
 			}
-			return json(res, 200, { ok: true, id, title: pm.title || "playlist", videos: videos.slice(0, 100) }, req);
+			return json(res, 200, { ok: true, id, title: pm.title || "playlist", videos: videos.filter((x) => !x.live).slice(0, 100) }, req);
 		}
 		if (route === "watch" && req.method === "GET") {
 			const v = (url.searchParams.get("v") || "").trim();
@@ -361,7 +439,7 @@ export default async function handle(req, res, route, url, ctx) {
 				.sort((a, b) => (parseInt(b.quality) || 0) - (parseInt(a.quality) || 0))
 				.slice(0, 3)
 				.map((s) => ({ q: s.quality, src: "/api/jetstream/stream?u=" + b64(s.url) }));
-			const related = (d.relatedStreams || []).filter((x) => x && x.url).slice(0, 18).map(item);
+			const related = (d.relatedStreams || []).filter((x) => x && x.url).slice(0, 18).map(item).filter((x) => !x.live);
 			return json(res, 200, { ok: true, id: v, title: d.title || "", uploader: d.uploader || "", thumb: "/api/jetstream/img?u=" + b64(d.thumbnailUrl || ""), dur: fmtDur(d.duration), views: d.views || 0, likes: d.likes || 0, uploaded: d.uploadDate || "", description: String(d.description || "").slice(0, 2000), streams, related, live: !!d.livestream, vertical: false });
 		}
 		if (route === "comments" && req.method === "GET") {
