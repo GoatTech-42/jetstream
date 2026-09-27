@@ -294,6 +294,19 @@ async function watchViaInnertube(v) {
 		.sort((a, b) => (b.height || 0) - (a.height || 0))
 		.slice(0, 3)
 		.map((s) => ({ q: s.qualityLabel, src: "/api/jetstream/stream?u=" + b64(s.url) }));
+	// HD: adaptive video-only (avc1, <=1080p) + best m4a audio. the client plays
+	// them as a synced video+audio pair (no server transcode, cpu stays idle).
+	const adapt = (d.streamingData && d.streamingData.adaptiveFormats) || [];
+	const seenH = new Set();
+	const hdVideos = adapt
+		.filter((f) => f && f.url && /video\/mp4/.test(f.mimeType || "") && /avc1/.test(f.mimeType || "") && (f.height || 0) > 360 && (f.height || 0) <= 1080)
+		.sort((a, b) => (b.height || 0) - (a.height || 0))
+		.filter((f) => { if (seenH.has(f.height)) return false; seenH.add(f.height); return true; })
+		.map((f) => ({ q: f.qualityLabel, h: f.height, src: "/api/jetstream/stream?u=" + b64(f.url) }));
+	const audioF = adapt
+		.filter((f) => f && f.url && /audio\/mp4/.test(f.mimeType || ""))
+		.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+	const hd = hdVideos.length && audioF ? { videos: hdVideos, audio: "/api/jetstream/stream?u=" + b64(audioF.url) } : null;
 	// caption tracks - proxied through us as webvtt so the client never leaves origin
 	let captions = [];
 	try {
@@ -314,7 +327,7 @@ async function watchViaInnertube(v) {
 		const d2 = await api("/search?q=" + encodeURIComponent(vd.author || "") + "&filter=videos");
 		related = (d2 && Array.isArray(d2.items) ? d2.items : []).filter((x) => x && x.type === "stream" && x.url && !x.url.includes(v)).slice(0, 18).map(item).filter((x) => !x.live);
 	} catch (e) {}
-	return { ok: true, id: v, title: vd.title || "", uploader: vd.author || "", chId: vd.channelId || "", thumb: "/api/jetstream/img?u=" + b64(thumbUrl), dur: fmtDur(vd.lengthSeconds), views: Number(vd.viewCount) || 0, likes: 0, uploaded: "", description: String(vd.shortDescription || "").slice(0, 2000), streams, related, live: !!vd.isLiveContent, vertical, captions };
+	return { ok: true, id: v, title: vd.title || "", uploader: vd.author || "", chId: vd.channelId || "", thumb: "/api/jetstream/img?u=" + b64(thumbUrl), dur: fmtDur(vd.lengthSeconds), views: Number(vd.viewCount) || 0, likes: 0, uploaded: "", description: String(vd.shortDescription || "").slice(0, 2000), streams, hd, related, live: !!vd.isLiveContent, vertical, captions };
 }
 
 export default async function handle(req, res, route, url, ctx) {
@@ -439,8 +452,16 @@ export default async function handle(req, res, route, url, ctx) {
 				.sort((a, b) => (parseInt(b.quality) || 0) - (parseInt(a.quality) || 0))
 				.slice(0, 3)
 				.map((s) => ({ q: s.quality, src: "/api/jetstream/stream?u=" + b64(s.url) }));
+			const seenH2 = new Set();
+			const hdV = (d.videoStreams || [])
+				.filter((x) => x && x.url && x.videoOnly === true && /\d+p/.test(x.quality || "") && parseInt(x.quality) > 360 && parseInt(x.quality) <= 1080 && /mp4/i.test(x.mimeType || x.codec || "mp4"))
+				.sort((a, b) => (parseInt(b.quality) || 0) - (parseInt(a.quality) || 0))
+				.filter((x) => { const h = parseInt(x.quality); if (seenH2.has(h)) return false; seenH2.add(h); return true; })
+				.map((x) => ({ q: x.quality, h: parseInt(x.quality), src: "/api/jetstream/stream?u=" + b64(x.url) }));
+			const au = (d.audioStreams || []).filter((x) => x && x.url && /mp4|m4a/i.test(x.mimeType || x.codec || "mp4")).sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+			const hd = hdV.length && au ? { videos: hdV, audio: "/api/jetstream/stream?u=" + b64(au.url) } : null;
 			const related = (d.relatedStreams || []).filter((x) => x && x.url).slice(0, 18).map(item).filter((x) => !x.live);
-			return json(res, 200, { ok: true, id: v, title: d.title || "", uploader: d.uploader || "", thumb: "/api/jetstream/img?u=" + b64(d.thumbnailUrl || ""), dur: fmtDur(d.duration), views: d.views || 0, likes: d.likes || 0, uploaded: d.uploadDate || "", description: String(d.description || "").slice(0, 2000), streams, related, live: !!d.livestream, vertical: false });
+			return json(res, 200, { ok: true, id: v, title: d.title || "", uploader: d.uploader || "", thumb: "/api/jetstream/img?u=" + b64(d.thumbnailUrl || ""), dur: fmtDur(d.duration), views: d.views || 0, likes: d.likes || 0, uploaded: d.uploadDate || "", description: String(d.description || "").slice(0, 2000), streams, hd, related, live: !!d.livestream, vertical: false });
 		}
 		if (route === "comments" && req.method === "GET") {
 			const v = (url.searchParams.get("v") || "").trim();

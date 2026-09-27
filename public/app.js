@@ -472,13 +472,28 @@ async function showWatch(id) {
 	catch (e) { return errBox("couldn't load that video."); }
 	pushHistory({ id: d.id, title: d.title, uploader: d.uploader, thumb: d.thumb || "", dur: d.dur });
 	const resume = store.settings.resume ? (store.progress[d.id] || 0) : 0;
-	const hasStreams = d.streams && d.streams.length > 0;
+	// quality ladder: HD adaptive pairs (video-only + shared audio track) first,
+	// then the progressive fallbacks. played as a synced video+audio pair so the
+	// box never transcodes.
+	const prog = (d.streams || []).map((x) => ({ q: x.q, src: x.src, hd: false }));
+	const hdv = (d.hd && d.hd.videos ? d.hd.videos : []).map((x) => ({ q: x.q, src: x.src, hd: true }));
+	const seenQ = new Set();
+	const qualities = hdv.concat(prog).filter((x) => { if (seenQ.has(x.q)) return false; seenQ.add(x.q); return true; });
+	d._qualities = qualities;
+	d._hdAudio = d.hd && d.hd.audio ? d.hd.audio : null;
+	const hasStreams = qualities.length > 0 && (!hdv.length || d._hdAudio);
 	let startIdx = 0;
-	if (hasStreams && store.settings.quality !== "auto") {
-		const qi = d.streams.findIndex((s) => s.q === store.settings.quality);
-		if (qi >= 0) startIdx = qi;
+	if (hasStreams) {
+		if (store.settings.quality !== "auto") {
+			const qi = qualities.findIndex((x) => x.q === store.settings.quality);
+			if (qi >= 0) startIdx = qi;
+		} else {
+			// auto: 1080p HD when it's there (luke: full 1080p at least), else best available
+			const qi = qualities.findIndex((x) => x.q === "1080p");
+			startIdx = qi >= 0 ? qi : 0;
+		}
 	}
-	const src = hasStreams ? d.streams[startIdx].src : "";
+	const src = hasStreams ? qualities[startIdx].src : "";
 	const metaBits = [fmtViews(d.views), d.uploaded ? d.uploaded.slice(0, 10) : "", d.likes ? fmtLikes(d.likes) + " likes" : ""].filter(Boolean).join(" · ");
 	const subbed = isSubbed(d.uploader);
 	const upLink = d.chId ? "#/c/" + encodeURIComponent(d.chId) : "#/s/" + encodeURIComponent(d.uploader);
@@ -486,7 +501,7 @@ async function showWatch(id) {
 	const qChip = qIdx >= 0 ? `<p class="qchip">playing all · ${esc(queue.label)} · ${qIdx + 1}/${queue.items.length}</p>` : "";
 	view.innerHTML = `<div class="watch">
 		${hasStreams
-			? `<div class="pwrap" id="pwrap"><video class="player${d.vertical ? " tall" : ""}" id="player" playsinline preload="metadata" crossorigin="anonymous" src="${esc(src)}"${d.thumb ? ` poster="${esc(d.thumb)}"` : ""}>${(d.captions || []).map((c, i) => `<track kind="captions" srclang="${esc(c.lang)}" label="${esc(c.label)}" src="${esc(c.src)}"${i === 0 ? " default" : ""}>`).join("")}</video>
+			? `<div class="pwrap" id="pwrap"><video class="player${d.vertical ? " tall" : ""}" id="player" playsinline preload="metadata" crossorigin="anonymous" src="${esc(src)}"${qualities[startIdx] && qualities[startIdx].hd ? " muted" : ""}${d.thumb ? ` poster="${esc(d.thumb)}"` : ""}>${(d.captions || []).map((c, i) => `<track kind="captions" srclang="${esc(c.lang)}" label="${esc(c.label)}" src="${esc(c.src)}"${i === 0 ? " default" : ""}>`).join("")}</video>
 				<div class="pspinner" id="pspinner" hidden></div>
 				<button class="pplay" id="pplay" aria-label="Play">${ICON.playBig}</button>
 				<div class="pctrl" id="pctrl">
@@ -511,7 +526,7 @@ async function showWatch(id) {
 			<button class="plain" id="laterbtn">${isLater(d.id) ? "saved" : "later"}</button>
 			<button class="plain subbtn${subbed ? " on" : ""}" id="subbtn">${subbed ? "subscribed" : "subscribe"}</button>
 		</div>
-		${hasStreams && d.streams.length > 1 ? `<div class="wrow"><label class="dim" for="qual">quality</label><select class="quality" id="qual">${d.streams.map((s, i) => `<option value="${i}"${i === startIdx ? " selected" : ""}>${esc(s.q)}</option>`).join("")}</select></div>` : ""}
+		${hasStreams && qualities.length > 1 ? `<div class="wrow"><label class="dim" for="qual">quality</label><select class="quality" id="qual">${qualities.map((x, i) => `<option value="${i}"${i === startIdx ? " selected" : ""}>${esc(x.q)}${x.hd ? " hd" : ""}</option>`).join("")}</select></div>` : ""}
 		${d.description ? `<details class="desc"><summary>description</summary><pre>${esc(d.description)}</pre></details>` : ""}
 		${hasStreams ? '<details class="desc" id="cmtdetails"><summary id="cmtsummary">comments</summary><div class="cmts" id="cmts"><p class="dim" style="margin:6px 2px">loading comments...</p></div></details>' : ""}
 		${d.related && d.related.length ? '<h2 class="sec">up next</h2>' : ""}
@@ -567,8 +582,12 @@ function wirePlayer(d, resume) {
 		muteBtn = byId("pbtn-mute"), ccBtn = byId("pbtn-cc"), speedBtn = byId("pbtn-speed"), fsBtn = byId("pbtn-fs");
 
 	// -- resume + progress + autoplay (unchanged behavior) --
-	let lastSave = 0;
-	v.addEventListener("loadedmetadata", () => { if (resume > 10 && resume < v.duration - 10) v.currentTime = resume; ui(); });
+	let lastSave = 0, firstMeta = true, pendingSeek = null;
+	v.addEventListener("loadedmetadata", () => {
+		if (pendingSeek != null) { v.currentTime = pendingSeek; pendingSeek = null; }
+		else if (firstMeta && resume > 10 && resume < v.duration - 10) v.currentTime = resume;
+		firstMeta = false; ui();
+	});
 	v.addEventListener("timeupdate", () => {
 		if (Date.now() - lastSave > 5000) { lastSave = Date.now(); setProgress(d.id, v.currentTime); }
 		ui();
@@ -583,11 +602,54 @@ function wirePlayer(d, resume) {
 		const nxt = (d.related || [])[0];
 		if (nxt) location.hash = "#/w/" + nxt.id;
 	});
+	// -- HD pair mode: video-only mp4 + separate audio element, kept in sync --
+	let au = null;
+	function ensureAudio() {
+		if (au || !d._hdAudio) return au;
+		au = new Audio(d._hdAudio);
+		au.preload = "auto";
+		au.id = "paudio";
+		au.style.display = "none";
+		document.body.appendChild(au); // dom-attached so ios keeps it alive + inspectable
+		return au;
+	}
+	function syncAudio(hard) {
+		if (!au) return;
+		if (hard || Math.abs(au.currentTime - v.currentTime) > 0.35) au.currentTime = v.currentTime;
+	}
+	v.addEventListener("play", () => { if (au) { syncAudio(true); au.play().catch(() => {}); } });
+	v.addEventListener("pause", () => { if (au) au.pause(); });
+	v.addEventListener("seeked", () => syncAudio(true));
+	v.addEventListener("volumechange", () => { if (au) { au.volume = v.muted ? 0 : v.volume; au.muted = v.muted; } });
+	v.addEventListener("ratechange", () => { if (au) au.playbackRate = v.playbackRate; });
+	const auTimer = setInterval(() => {
+		if (!v.isConnected) { clearInterval(auTimer); return; }
+		if (!au) return;
+		if (v.paused) { if (!au.paused) au.pause(); return; }
+		if (au.paused) { syncAudio(true); au.play().catch(() => {}); return; }
+		if (Math.abs(au.currentTime - v.currentTime) > 0.3) au.currentTime = v.currentTime;
+	}, 600);
+	if (d._qualities[0] && d._qualities.some((x) => x.hd) && v.muted && d._hdAudio) {
+		// initial source is HD - bring the audio pair up with it
+		ensureAudio();
+		if (au) { au.muted = false; au.volume = 1; }
+	}
 	const sel = document.getElementById("qual");
 	if (sel) sel.addEventListener("change", () => {
+		const q = d._qualities[Number(sel.value)];
+		if (!q) return;
 		const t = v.currentTime, playing = !v.paused;
-		v.src = d.streams[Number(sel.value)].src;
-		v.currentTime = t;
+		if (q.hd && d._hdAudio) {
+			ensureAudio();
+			v.muted = true; // video-only stream; the pair element carries sound
+			v.src = q.src;
+			if (au) { au.muted = false; }
+		} else {
+			if (au) { au.pause(); au.remove(); au = null; }
+			v.muted = false;
+			v.src = q.src;
+		}
+		pendingSeek = t;
 		if (playing) v.play().catch(() => {});
 	});
 
@@ -792,7 +854,9 @@ function showSettings() {
 		<div class="setrow"><span>clear watch history when i close jetstream</span><input type="checkbox" id="set-wipe"${s.clearOnExit ? " checked" : ""}></div>
 		<div class="setrow"><span>default quality</span><select class="quality" id="set-quality">
 			<option value="auto"${s.quality === "auto" ? " selected" : ""}>auto</option>
+			<option value="1080p"${s.quality === "1080p" ? " selected" : ""}>1080p</option>
 			<option value="720p"${s.quality === "720p" ? " selected" : ""}>720p</option>
+			<option value="480p"${s.quality === "480p" ? " selected" : ""}>480p</option>
 			<option value="360p"${s.quality === "360p" ? " selected" : ""}>360p</option>
 		</select></div>
 		<p class="dim" style="font-size:12.5px">synced to your ramjet account - same settings, history and subscriptions on every device.</p>
