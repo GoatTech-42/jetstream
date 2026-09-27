@@ -40,7 +40,24 @@ async function api(path) {
 }
 function b64(u) { return Buffer.from(String(u), "utf8").toString("base64url"); }
 function unb64(s) { try { return Buffer.from(String(s), "base64url").toString("utf8"); } catch { return null; } }
-const HOST_OK = /(^|\.)googlevideo\.com$|(^|\.)youtube\.com$|(^|\.)ytimg\.com$|(^|\.)ggpht\.com$|(^|\.)googleusercontent\.com$|(^|\.)piped\.private\.coffee$|(^|\.)adminforge\.de$|(^|\.)kavin\.rocks$/i;
+// soundcloud public client_id, scraped like every proxy music site does it -
+// cached in-process; re-scraped when a call starts 403ing (id rotation).
+let scCid = "", scCidAt = 0;
+async function scClientId(force = false) {
+	if (!force && scCid && Date.now() - scCidAt < 6 * 3600e3) return scCid;
+	const html = await (await fetch("https://soundcloud.com/", { headers: { "user-agent": WEB_UA }, signal: AbortSignal.timeout(12000) })).text();
+	const srcs = [...html.matchAll(/<script[^>]+src="(https:\/\/a-v2\.sndcdn\.com\/[^"]+\.js)"/g)].map((m) => m[1]);
+	for (const src of srcs.reverse()) {
+		try {
+			const js = await (await fetch(src, { headers: { "user-agent": WEB_UA }, signal: AbortSignal.timeout(12000) })).text();
+			const m = /client_id\s*[:=]\s*"([a-zA-Z0-9]{32})"/.exec(js) || /client_id\s*[:=]\s*"([a-zA-Z0-9]{24,40})"/.exec(js);
+			if (m) { scCid = m[1]; scCidAt = Date.now(); return scCid; }
+		} catch (e) {}
+	}
+	if (scCid) return scCid;
+	throw new Error("no soundcloud client_id");
+}
+const HOST_OK = /(^|\.)googlevideo\.com$|(^|\.)youtube\.com$|(^|\.)ytimg\.com$|(^|\.)ggpht\.com$|(^|\.)googleusercontent\.com$|(^|\.)sndcdn\.com$|(^|\.)soundcloud\.com$|(^|\.)piped\.private\.coffee$|(^|\.)adminforge\.de$|(^|\.)kavin\.rocks$/i;
 function proxyHostOK(u) { try { return HOST_OK.test(new URL(u).hostname); } catch { return false; } }
 function fmtDur(sec) { sec = Math.max(0, Number(sec) || 0); return Math.floor(sec / 60) + ":" + String(Math.floor(sec) % 60).padStart(2, "0"); }
 // mqdefault (320x180) for grid cards - half the bytes of hqdefault, same shape.
@@ -713,6 +730,130 @@ export default async function handle(req, res, route, url, ctx) {
 			if (!/^[a-zA-Z0-9_-]{11}$/.test(v)) return json(res, 400, { error: "bad video id" });
 			return json(res, 200, await cached("comments:" + v, 10 * 60 * 1000, () => commentsFor(v)), req);
 		}
+		if (route === "ymsearch" && req.method === "GET") {
+			// youtube music catalog (Luke 9/26: YT music ok, not youtube.com videos) -
+			// the WEB_REMIX innertube client, audio-only playback via the watch route.
+			const q = (url.searchParams.get("q") || "").trim();
+			if (!q) return json(res, 400, { error: "missing q" }, req);
+			try {
+				const d = await cached("ymsearch:" + q.toLowerCase(), 10 * 60 * 1000, async () => {
+					let lastErr = null;
+					for (const key of INNERTUBE_KEYS) {
+						try {
+							const r = await fetch("https://music.youtube.com/youtubei/v1/search?key=" + key, {
+								method: "POST",
+								headers: { "content-type": "application/json", "user-agent": WEB_UA },
+								body: JSON.stringify({ context: { client: { clientName: "WEB_REMIX", clientVersion: "1.20240925.01.00", hl: "en" } }, query: q }),
+								signal: AbortSignal.timeout(15000),
+							});
+							if (!r.ok) { lastErr = new Error("ym " + r.status); continue; }
+							const j = await r.json();
+							if (j && j.error) { lastErr = new Error("ym: " + (j.error.message || "error")); continue; }
+							return j;
+						} catch (e) { lastErr = e; }
+					}
+					throw lastErr || new Error("ym search failed");
+				});
+				const seen = new Set(), items = [];
+				for (const it of walkAll(d, "musicResponsiveListItemRenderer")) {
+					let videoId = "";
+					try { videoId = it.playlistItemData.videoId || ""; } catch (e) {}
+					if (!videoId) { try { videoId = it.overlay.musicItemThumbnailOverlayRenderer.content.musicPlayButtonRenderer.playNavigationEndpoint.watchEndpoint.videoId || ""; } catch (e) {} }
+					if (!/^[a-zA-Z0-9_-]{11}$/.test(videoId) || seen.has(videoId)) continue;
+					seen.add(videoId);
+					const cols = (it.flexColumns || []).map((c) => ((c.musicResponsiveListItemFlexColumnRenderer && c.musicResponsiveListItemFlexColumnRenderer.text && c.musicResponsiveListItemFlexColumnRenderer.text.runs) || []));
+					const fixed = (it.fixedColumns || []).map((c) => ((c.musicResponsiveListItemFixedColumnRenderer && c.musicResponsiveListItemFixedColumnRenderer.text && c.musicResponsiveListItemFixedColumnRenderer.text.runs) || []));
+					const title = ((cols[0] || [])[0] || {}).text || "";
+					const metaTexts = (cols[1] || []).map((r) => r.text).filter((t) => t && !/^[\u2022\s]+$/.test(t));
+					const allFixed = fixed.flat().map((r) => r.text).join(" ");
+					const allFlex = cols.slice(1).flat().map((r) => r.text).join(" ");
+					const dm = /(\d+:)?\d+:\d+/.exec(allFixed) || /(\d+:)?\d+:\d+/.exec(allFlex);
+					const dur = dm ? dm[0] : "";
+					const secs = dur ? dur.split(":").reduce((a, x) => a * 60 + parseInt(x), 0) : 0;
+					const type = metaTexts[0] || "";
+					if (type && type !== "Song" && type !== "Single") continue; // songs only
+					const uploader = metaTexts.filter((t) => t !== type && !/^(\d+:)?\d+:\d+$/.test(t))[0] || "";
+					let thumb = "";
+					try { const th = it.thumbnail.musicThumbnailRenderer.thumbnail.thumbnails; thumb = th[th.length - 1].url; } catch (e) {}
+					if (!title) continue;
+					items.push({ id: videoId, title, uploader, thumb: thumb ? "/api/jetstream/img?u=" + b64(thumb) : "", dur, durSec: secs, yt: true });
+				}
+				return json(res, 200, { ok: true, items: items.slice(0, 20) }, req);
+			} catch (e) { return json(res, 502, { error: "ytmusic failed" }, req); }
+		}
+		if (route === "scsearch" && req.method === "GET") {
+			// soundcloud public-web search (what real proxy music sites use).
+			const q = (url.searchParams.get("q") || "").trim();
+			if (!q) return json(res, 400, { error: "missing q" }, req);
+			try {
+				const d = await cached("scsearch:" + q.toLowerCase(), 10 * 60 * 1000, async () => {
+					const cid = await scClientId();
+					const r = await fetch("https://api-v2.soundcloud.com/search/tracks?q=" + encodeURIComponent(q) + "&limit=24&client_id=" + cid, { headers: { "user-agent": WEB_UA }, signal: AbortSignal.timeout(15000) });
+					if (!r.ok) throw new Error("sc " + r.status);
+					return r.json();
+				});
+				// only tracks with a progressive (plain-mp3) transcoding can stream through
+				// scstream - encrypted-hls-only tracks cannot play in a browser.
+				const items = (d.collection || []).filter((t) => {
+					if (!t || !t.id || t.streamable === false) return false;
+					const tcs = (t.media && t.media.transcodings) || [];
+					return tcs.length === 0 || tcs.some((x) => x.format && x.format.protocol === "progressive");
+				}).map((t) => ({
+					id: "sc-" + t.id,
+					title: t.title || "",
+					uploader: (t.user && t.user.username) || "",
+					thumb: t.artwork_url ? "/api/jetstream/img?u=" + b64(t.artwork_url.replace("-large", "-t500x500")) : "",
+					dur: fmtDur((t.duration || 0) / 1000), durSec: Math.round((t.duration || 0) / 1000),
+					src: "/api/jetstream/scstream?id=" + t.id,
+					sc: true,
+				}));
+				return json(res, 200, { ok: true, items }, req);
+			} catch (e) { return json(res, 502, { error: "soundcloud failed" }, req); }
+		}
+		if (route === "scstream" && req.method === "GET") {
+			const id = (url.searchParams.get("id") || "").trim();
+			if (!/^\d{5,15}$/.test(id)) return json(res, 400, { error: "bad id" }, req);
+			try {
+				const cid = await scClientId();
+				// signed progressive urls expire in minutes - cache the resolve only briefly,
+				// and re-resolve once if the upstream rejects the cached one.
+				const resolveMedia = async () => await cached("scmedia:" + id, 45 * 1000, async () => {
+					const r = await fetch("https://api-v2.soundcloud.com/tracks/" + id + "?client_id=" + cid, { headers: { "user-agent": WEB_UA }, signal: AbortSignal.timeout(15000) });
+					if (!r.ok) throw new Error("sc track " + r.status);
+					const t = await r.json();
+					const tc = (t.media && t.media.transcodings || []).find((x) => x.format && x.format.protocol === "progressive" && /mp3/.test(x.format.mime_type || ""))
+						|| (t.media && t.media.transcodings || []).find((x) => x.format && x.format.protocol === "progressive");
+					if (!tc) throw new Error("no progressive stream");
+					const r2 = await fetch(tc.url + "?client_id=" + cid, { headers: { "user-agent": WEB_UA }, signal: AbortSignal.timeout(15000) });
+					if (!r2.ok) throw new Error("sc resolve " + r2.status);
+					const j = await r2.json();
+					if (!j || !j.url) throw new Error("no url");
+					return j.url;
+				});
+				let media = await resolveMedia();
+				const headers = { "user-agent": WEB_UA };
+				if (req.headers.range) headers.range = req.headers.range;
+				let r = await fetch(media, { headers, redirect: "follow", signal: AbortSignal.timeout(30000) });
+				if (!r.ok && r.status !== 206) {
+					apiCache.delete("scmedia:" + id);
+					media = await resolveMedia();
+					r = await fetch(media, { headers, redirect: "follow", signal: AbortSignal.timeout(30000) });
+					if (!r.ok && r.status !== 206) { res.writeHead(502); return res.end(); }
+				}
+				const h = { "cache-control": "public, max-age=3600" };
+				for (const k of ["content-type", "content-length", "content-range", "accept-ranges"]) {
+					const val = r.headers.get(k);
+					if (val) h[k] = val;
+				}
+				if (!h["content-type"]) h["content-type"] = "audio/mpeg";
+				res.writeHead(r.status === 206 ? 206 : 200, h);
+				if (!r.body) return res.end();
+				for await (const chunk of r.body) {
+					if (!res.write(chunk)) await new Promise((d2) => res.once("drain", d2));
+				}
+				return res.end();
+			} catch (e) { res.writeHead(502); return res.end(); }
+		}
 		if (route === "auimg" && req.method === "GET") {
 			// audius artwork: content nodes are arbitrary hosts, so validate the
 			// request shape instead - https, no creds, /content/<cid>/<size>.<ext>
@@ -759,6 +900,57 @@ export default async function handle(req, res, route, url, ctx) {
 		if ((route === "stream" || route === "img" || route === "cap") && req.method === "GET") {
 			const u = unb64(url.searchParams.get("u") || "");
 			if (!u || !proxyHostOK(u)) return json(res, 400, { error: "bad url" });
+			// googlevideo throttles long reads to a stall after ~1MB (the n-challenge),
+			// but every fresh range request gets a full-speed burst. for open-ended
+			// reads (how browsers stream media) fetch 1MB chunks and stitch them.
+			if (route === "stream" && /(^|\.)googlevideo\.com$/.test(new URL(u).hostname)) {
+				const rm = /^bytes=(\d+)-(\d*)$/.exec(req.headers.range || "");
+				if (!req.headers.range || (rm && !rm[2])) {
+					const start = rm ? parseInt(rm[1], 10) : 0;
+					const CHUNK = 1 << 20;
+					let pos = start, total = -1, sent = false, dead = false, cur = null;
+					// kill the upstream read the moment the client leaves - googlevideo
+					// 403s a second connection while an abandoned one is still draining.
+					res.once("close", () => { dead = true; try { if (cur && cur.body) cur.body.cancel(); } catch (e) {} });
+					try {
+						while (!dead) {
+							let r = await fetch(u, { headers: { "user-agent": "ramjet-jetstream/1.2", range: "bytes=" + pos + "-" + (pos + CHUNK - 1) }, redirect: "follow", signal: AbortSignal.timeout(30000) });
+							if (r.status === 403 || r.status === 429) {
+								try { r.body && r.body.cancel(); } catch (e) {}
+								await new Promise((d2) => setTimeout(d2, 400));
+								r = await fetch(u, { headers: { "user-agent": "ramjet-jetstream/1.2", range: "bytes=" + pos + "-" + (pos + CHUNK - 1) }, redirect: "follow", signal: AbortSignal.timeout(30000) });
+							}
+							cur = r;
+							if (r.status !== 206 && r.status !== 200) { if (!sent) res.writeHead(502); return res.end(); }
+							if (!sent) {
+								const cr = r.headers.get("content-range") || "";
+								const mt = /\/(\d+)$/.exec(cr);
+								total = mt ? parseInt(mt[1], 10) : -1;
+								const h = { "content-type": r.headers.get("content-type") || "video/mp4", "cache-control": "private, no-store" };
+								if (rm) {
+									h["accept-ranges"] = "bytes";
+									if (total > 0) h["content-range"] = "bytes " + start + "-" + (total - 1) + "/" + total;
+									res.writeHead(206, h);
+								} else {
+									if (total > 0) h["content-length"] = String(total);
+									res.writeHead(200, h);
+								}
+								sent = true;
+							}
+							let got = 0;
+							if (r.body) {
+								for await (const chunk of r.body) {
+									got += chunk.length;
+									if (dead || !res.write(chunk)) { if (dead) break; await new Promise((d2) => res.once("drain", d2)); }
+								}
+							}
+							pos += got;
+							if (got === 0 || (total > 0 && pos >= total)) break;
+						}
+					} catch (e) { /* client left or upstream stalled - nothing more to do */ }
+					return res.end();
+				}
+			}
 			const headers = { "user-agent": "ramjet-jetstream/1.2" };
 			if (route === "stream" && req.headers.range) headers.range = req.headers.range;
 			const r = await fetch(u, { headers, redirect: "follow", signal: AbortSignal.timeout(30000) });
