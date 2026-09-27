@@ -5,9 +5,25 @@
 // GoatTech, 2026. MIT.
 const UPSTREAMS = (process.env.JETSTREAM_UPSTREAMS || process.env.RAMJET_TUBE_UPSTREAMS || "https://api.piped.private.coffee,https://pipedapi.adminforge.de,https://pipedapi.kavin.rocks").split(",").map((s) => s.trim()).filter(Boolean);
 
-function json(res, code, obj) {
+async function json(res, code, obj, req) {
+	const body = Buffer.from(JSON.stringify(obj), "utf8");
+	if (req && body.length > 1024 && String(req.headers["accept-encoding"] || "").includes("gzip")) {
+		const { gzipSync } = await import("node:zlib");
+		res.writeHead(code, { "content-type": "application/json", "content-encoding": "gzip", vary: "accept-encoding" });
+		return res.end(gzipSync(body));
+	}
 	res.writeHead(code, { "content-type": "application/json" });
-	res.end(JSON.stringify(obj));
+	res.end(body);
+}
+const apiCache = new Map();
+const API_CACHE_MAX = 120;
+async function cachedApi(path, ttlMs) {
+	const hit = apiCache.get(path);
+	if (hit && Date.now() - hit.ts < ttlMs) return hit.data;
+	const data = await api(path);
+	apiCache.set(path, { data, ts: Date.now() });
+	if (apiCache.size > API_CACHE_MAX) apiCache.delete(apiCache.keys().next().value);
+	return data;
 }
 async function api(path) {
 	let lastErr = null;
@@ -27,7 +43,8 @@ function proxyHostOK(u) { try { return HOST_OK.test(new URL(u).hostname); } catc
 function fmtDur(sec) { sec = Math.max(0, Number(sec) || 0); return Math.floor(sec / 60) + ":" + String(Math.floor(sec) % 60).padStart(2, "0"); }
 function item(it) {
 	const id = (it.url || "").split("v=").pop();
-	return { id, title: it.title || "", thumb: "/api/jetstream/img?u=" + b64(it.thumbnail || ""), dur: fmtDur(it.duration), uploader: it.uploaderName || it.uploader || "", views: it.views || it.viewCount || 0 };
+	const chId = (it.uploaderUrl || "").split("/channel/").pop() || "";
+	return { id, title: it.title || "", thumb: "/api/jetstream/img?u=" + b64(it.thumbnail || ""), dur: fmtDur(it.duration), uploader: it.uploaderName || it.uploader || "", chId, views: it.views || it.viewCount || 0 };
 }
 
 
@@ -70,28 +87,28 @@ async function watchViaInnertube(v) {
 		const d2 = await api("/search?q=" + encodeURIComponent(vd.author || "") + "&filter=videos");
 		related = (d2 && Array.isArray(d2.items) ? d2.items : []).filter((x) => x && x.type === "stream" && x.url && !x.url.includes(v)).slice(0, 18).map(item);
 	} catch (e) {}
-	return { ok: true, id: v, title: vd.title || "", uploader: vd.author || "", thumb: "/api/jetstream/img?u=" + b64(thumbUrl), dur: fmtDur(vd.lengthSeconds), views: Number(vd.viewCount) || 0, likes: 0, uploaded: "", description: String(vd.shortDescription || "").slice(0, 2000), streams, related, live: !!vd.isLiveContent };
+	return { ok: true, id: v, title: vd.title || "", uploader: vd.author || "", chId: vd.channelId || "", thumb: "/api/jetstream/img?u=" + b64(thumbUrl), dur: fmtDur(vd.lengthSeconds), views: Number(vd.viewCount) || 0, likes: 0, uploaded: "", description: String(vd.shortDescription || "").slice(0, 2000), streams, related, live: !!vd.isLiveContent };
 }
 
 export default async function handle(req, res, route, url, ctx) {
 	if (!ctx.user) { json(res, 401, { error: "no session" }); return; }
 	try {
 		if (route === "trending" && req.method === "GET") {
-			const d = await api("/trending?region=US");
-			return json(res, 200, { ok: true, items: (Array.isArray(d) ? d : []).filter((x) => x && x.url).map(item) });
+			const d = await cachedApi("/trending?region=US", 10 * 60 * 1000);
+			return json(res, 200, { ok: true, items: (Array.isArray(d) ? d : []).filter((x) => x && x.url).map(item) }, req);
 		}
 		if (route === "search" && req.method === "GET") {
 			const q = (url.searchParams.get("q") || "").trim();
 			if (!q) return json(res, 400, { error: "missing q" });
-			const d = await api("/search?q=" + encodeURIComponent(q) + "&filter=videos");
+			const d = await cachedApi("/search?q=" + encodeURIComponent(q) + "&filter=videos", 5 * 60 * 1000);
 			const items = (d && Array.isArray(d.items) ? d.items : []).filter((x) => x && x.type === "stream" && x.url).map(item);
-			return json(res, 200, { ok: true, items });
+			return json(res, 200, { ok: true, items }, req);
 		}
 		if (route === "watch" && req.method === "GET") {
 			const v = (url.searchParams.get("v") || "").trim();
 			if (!/^[a-zA-Z0-9_-]{11}$/.test(v)) return json(res, 400, { error: "bad video id" });
 			try {
-				return json(res, 200, await watchViaInnertube(v));
+				return json(res, 200, await watchViaInnertube(v), req);
 			} catch (e) {}
 			const d = await api("/streams/" + v);
 			const streams = (d.videoStreams || [])

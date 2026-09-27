@@ -1,12 +1,13 @@
 // jetstream client - hash-routed youtube frontend riding ramjet's session.
-// per-user data (watch history, resume positions) syncs through ramjet's
-// encrypted sync blob under the "jetstream" key, with a localStorage
+// per-user data (history, resume, settings, subscriptions) syncs through
+// ramjet's encrypted sync blob under the "jetstream" key, localStorage
 // fallback when sync is locked or off.
 const view = document.getElementById("view");
 const qInput = document.getElementById("q");
 const LS_KEY = "jetstream-store";
+const DEFAULT_SETTINGS = { autoplayNext: true, resume: true, quality: "auto" };
 
-let store = { history: [], progress: {} };
+let store = { history: [], progress: {}, settings: { ...DEFAULT_SETTINGS }, subs: [] };
 let saveQueued = false;
 
 function esc(s) { return String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
@@ -26,8 +27,17 @@ async function api(path) {
 }
 
 // -- per-user store -----------------------------------------------------------
+function norm(s) {
+	if (!s || typeof s !== "object") return;
+	store = {
+		history: s.history || [],
+		progress: s.progress || {},
+		settings: { ...DEFAULT_SETTINGS, ...(s.settings || {}) },
+		subs: Array.isArray(s.subs) ? s.subs : [],
+	};
+}
 function loadLocal() {
-	try { const s = JSON.parse(localStorage.getItem(LS_KEY) || "null"); if (s && typeof s === "object") store = { history: s.history || [], progress: s.progress || {} }; } catch (e) {}
+	try { norm(JSON.parse(localStorage.getItem(LS_KEY) || "null")); } catch (e) {}
 }
 async function loadRemote() {
 	if (typeof RJCrypto === "undefined") return;
@@ -35,8 +45,8 @@ async function loadRemote() {
 		if (!RJCrypto.unlocked()) await RJCrypto.tryRestore();
 		if (!RJCrypto.unlocked()) return;
 		const blob = await RJCrypto.pull();
-		if (blob && blob.jetstream && typeof blob.jetstream === "object") {
-			store = { history: blob.jetstream.history || [], progress: blob.jetstream.progress || {} };
+		if (blob && blob.jetstream) {
+			norm(blob.jetstream);
 			try { localStorage.setItem(LS_KEY, JSON.stringify(store)); } catch (e) {}
 		}
 	} catch (e) {}
@@ -50,7 +60,7 @@ function save() {
 		if (typeof RJCrypto === "undefined" || !RJCrypto.unlocked()) return;
 		try {
 			const blob = (await RJCrypto.pull()) || {};
-			blob.jetstream = { history: store.history.slice(0, 40), progress: store.progress };
+			blob.jetstream = { history: store.history.slice(0, 40), progress: store.progress, settings: store.settings, subs: store.subs };
 			await RJCrypto.push(blob);
 		} catch (e) {}
 	}, 1200);
@@ -68,6 +78,12 @@ function pushHistory(it) {
 function setProgress(id, seconds) {
 	if (!id || !isFinite(seconds) || seconds < 5) return;
 	store.progress[id] = Math.floor(seconds);
+	save();
+}
+function isSubbed(name) { return store.subs.some((s) => s.name.toLowerCase() === String(name || "").toLowerCase()); }
+function toggleSub(name, chId) {
+	if (isSubbed(name)) store.subs = store.subs.filter((s) => s.name.toLowerCase() !== name.toLowerCase());
+	else store.subs.unshift({ name, chId: chId || "", at: Date.now() });
 	save();
 }
 
@@ -131,20 +147,36 @@ async function showWatch(id) {
 	try { d = await api("watch?v=" + encodeURIComponent(id)); }
 	catch (e) { return errBox("couldn't load that video."); }
 	pushHistory({ id: d.id, title: d.title, uploader: d.uploader, thumb: d.thumb || "", dur: d.dur });
-	const resume = store.progress[d.id] || 0;
+	const resume = store.settings.resume ? (store.progress[d.id] || 0) : 0;
 	const hasStreams = d.streams && d.streams.length > 0;
-	const src = hasStreams ? d.streams[0].src : "";
+	let startIdx = 0;
+	if (hasStreams && store.settings.quality !== "auto") {
+		const qi = d.streams.findIndex((s) => s.q === store.settings.quality);
+		if (qi >= 0) startIdx = qi;
+	}
+	const src = hasStreams ? d.streams[startIdx].src : "";
 	const metaBits = [fmtViews(d.views), d.uploaded ? d.uploaded.slice(0, 10) : "", d.likes ? d.likes + " likes" : ""].filter(Boolean).join(" · ");
+	const subbed = isSubbed(d.uploader);
 	view.innerHTML = `<div class="watch">
 		${hasStreams
 			? `<video class="player" id="player" controls playsinline preload="metadata" src="${esc(src)}"${d.thumb ? ` poster="${esc(d.thumb)}"` : ""}></video>`
 			: `<div class="note">${d.live ? "this one's live - live playback isn't supported yet." : "no playable stream for this video."}</div>`}
 		<p class="wtitle">${esc(d.title)}</p>
-		<p class="wmeta"><a class="uplink" href="#/s/${encodeURIComponent(d.uploader)}">${esc(d.uploader)}</a>${metaBits ? " · " + esc(metaBits) : ""}</p>
-		${hasStreams && d.streams.length > 1 ? `<div class="wrow"><label class="dim" for="qual">quality</label><select class="quality" id="qual">${d.streams.map((s, i) => `<option value="${i}">${esc(s.q)}</option>`).join("")}</select></div>` : ""}
+		<div class="wsubrow">
+			<p class="wmeta" style="margin:0"><a class="uplink" href="#/s/${encodeURIComponent(d.uploader)}">${esc(d.uploader)}</a>${metaBits ? " · " + esc(metaBits) : ""}</p>
+			<button class="plain subbtn${subbed ? " on" : ""}" id="subbtn">${subbed ? "subscribed" : "subscribe"}</button>
+		</div>
+		${hasStreams && d.streams.length > 1 ? `<div class="wrow"><label class="dim" for="qual">quality</label><select class="quality" id="qual">${d.streams.map((s, i) => `<option value="${i}"${i === startIdx ? " selected" : ""}>${esc(s.q)}</option>`).join("")}</select></div>` : ""}
 		${d.description ? `<details class="desc"><summary>description</summary><pre>${esc(d.description)}</pre></details>` : ""}
 		${d.related && d.related.length ? '<h2 class="sec">up next</h2>' : ""}
 	</div>` + grid(d.related || []);
+	document.getElementById("subbtn").addEventListener("click", () => {
+		toggleSub(d.uploader, d.chId || "");
+		const b = document.getElementById("subbtn");
+		const on = isSubbed(d.uploader);
+		b.textContent = on ? "subscribed" : "subscribe";
+		b.classList.toggle("on", on);
+	});
 	if (hasStreams) wirePlayer(d, resume);
 }
 
@@ -160,9 +192,9 @@ function wirePlayer(d, resume) {
 	});
 	v.addEventListener("pause", () => setProgress(d.id, v.currentTime));
 	window.addEventListener("pagehide", () => setProgress(d.id, v.currentTime), { once: true });
-	// up next: roll straight into the first related video when this one ends
 	v.addEventListener("ended", () => {
 		setProgress(d.id, 0);
+		if (!store.settings.autoplayNext) return;
 		const nxt = (d.related || [])[0];
 		if (nxt) location.hash = "#/w/" + nxt.id;
 	});
@@ -196,6 +228,63 @@ function showHistory() {
 	});
 }
 
+// -- subscriptions --------------------------------------------------------------
+async function showSubs() {
+	setTab("subs");
+	if (!store.subs.length) {
+		view.innerHTML = '<div class="note"><p>no subscriptions yet.</p><p class="dim" style="margin:0">hit subscribe on any watch page and that channel lands here, synced to your ramjet account.</p></div>';
+		return;
+	}
+	const rows = store.subs.map((s) => `<div class="subrow">
+		<a class="subname" href="#/s/${encodeURIComponent(s.name)}">${esc(s.name)}</a>
+		<button class="plain" data-unsub="${esc(s.name)}">unsubscribe</button>
+	</div>`).join("");
+	view.innerHTML = `<h2 class="sec pad" style="padding-bottom:0">subscriptions</h2><div class="subs">${rows}</div><h2 class="sec pad" style="padding-bottom:0">latest from your channels</h2><div id="subsfeed">${skeleton()}</div>`;
+	for (const b of document.querySelectorAll("[data-unsub]")) {
+		b.addEventListener("click", () => { toggleSub(b.dataset.unsub); showSubs(); });
+	}
+	// latest: top videos per channel via search, merged, deduped
+	try {
+		const names = store.subs.slice(0, 8).map((s) => s.name);
+		const results = await Promise.all(names.map((n) => api("search?q=" + encodeURIComponent(n)).catch(() => ({ items: [] }))));
+		const seen = new Set();
+		const merged = [];
+		results.forEach((d, i) => {
+			const want = names[i].toLowerCase();
+			for (const it of d.items || []) {
+				if ((it.uploader || "").toLowerCase() !== want) continue;
+				if (seen.has(it.id)) continue;
+				seen.add(it.id);
+				merged.push(it);
+				if (merged.filter((x) => (x.uploader || "").toLowerCase() === want).length >= 2) break;
+			}
+		});
+		document.getElementById("subsfeed").innerHTML = grid(merged.slice(0, 24));
+	} catch (e) {
+		document.getElementById("subsfeed").innerHTML = '<p class="dim pad">the feed is rate-limited right now - try again in a bit.</p>';
+	}
+}
+
+// -- settings ------------------------------------------------------------------
+function showSettings() {
+	setTab("settings");
+	const s = store.settings;
+	view.innerHTML = `<div class="pad">
+		<h2 class="sec" style="padding:0 0 6px">settings</h2>
+		<div class="setrow"><span>autoplay next video</span><input type="checkbox" id="set-autoplay"${s.autoplayNext ? " checked" : ""}></div>
+		<div class="setrow"><span>resume where i left off</span><input type="checkbox" id="set-resume"${s.resume ? " checked" : ""}></div>
+		<div class="setrow"><span>default quality</span><select class="quality" id="set-quality">
+			<option value="auto"${s.quality === "auto" ? " selected" : ""}>auto</option>
+			<option value="720p"${s.quality === "720p" ? " selected" : ""}>720p</option>
+			<option value="360p"${s.quality === "360p" ? " selected" : ""}>360p</option>
+		</select></div>
+		<p class="dim" style="font-size:12.5px">synced to your ramjet account - same settings, history and subscriptions on every device.</p>
+	</div>`;
+	document.getElementById("set-autoplay").addEventListener("change", (e) => { store.settings.autoplayNext = e.target.checked; save(); });
+	document.getElementById("set-resume").addEventListener("change", (e) => { store.settings.resume = e.target.checked; save(); });
+	document.getElementById("set-quality").addEventListener("change", (e) => { store.settings.quality = e.target.value; save(); });
+}
+
 function route() {
 	const h = location.hash || "#/";
 	view.classList.remove("fade-in");
@@ -204,6 +293,8 @@ function route() {
 	if (h.startsWith("#/w/")) return showWatch(h.slice(4).split("?")[0]);
 	if (h.startsWith("#/s/")) return showSearch(decodeURIComponent(h.slice(4)));
 	if (h === "#/history") return showHistory();
+	if (h === "#/subs") return showSubs();
+	if (h === "#/settings") return showSettings();
 	return showTrending();
 }
 
@@ -215,4 +306,4 @@ document.getElementById("search").addEventListener("submit", (e) => {
 window.addEventListener("hashchange", route);
 loadLocal();
 route();
-loadRemote().then(() => { if ((location.hash || "#/") === "#/history") showHistory(); });
+loadRemote().then(() => { const h = location.hash || "#/"; if (h === "#/history" || h === "#/subs" || h === "#/settings") route(); });
