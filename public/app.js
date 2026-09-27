@@ -415,18 +415,40 @@ async function showChannel(id) {
 		<div class="chinfo">
 			<p class="chname">${esc(d.name)}</p>
 			${d.subs ? `<p class="dim" style="margin:2px 0 0">${esc(d.subs)}</p>` : ""}
+			${!d.subs && d.vidCount ? `<p class="dim" style="margin:2px 0 0">${esc(d.vidCount)} videos</p>` : ""}
 		</div>
 		<button class="plain subbtn${subbed ? " on" : ""}" id="subbtn">${subbed ? "subscribed" : "subscribe"}</button>
 	</div>
-	${vids.length ? `<div class="pad" style="padding-top:0"><button class="plain" id="playall">play all (${vids.length})</button></div>` : ""}
+	${vids.length ? `<div class="pad" style="padding-top:0"><button class="plain" id="playall">play all</button></div>` : ""}
 	${d.description ? `<details class="desc pad" style="padding-top:0"><summary>about</summary><pre>${esc(d.description)}</pre></details>` : ""}
 	${shorts.length ? `<h2 class="sec">shorts</h2><div class="shortrow">${shorts.map(shortCard).join("")}</div>` : ""}
 	${pls.length ? `<h2 class="sec">playlists</h2><div class="plrow">${pls.map((pl) => `<a class="plcard" href="#/p/${esc(pl.id)}">
 		${pl.thumb ? `<img loading="lazy" src="${esc(pl.thumb)}" alt="">` : ""}
 		<span class="plinfo"><b>${esc(pl.title)}</b><span class="dim">playlist</span></span>
 	</a>`).join("")}</div>` : ""}
-	${vids.length ? '<h2 class="sec">videos</h2>' + grid(vids) : ""}
+	${vids.length ? '<h2 class="sec">videos</h2>' + grid(vids) + '<div id="chmore"></div>' : ""}
 	${!vids.length && !shorts.length ? '<p class="dim pad">no videos found on this channel.</p>' : ""}`;
+	// endless channel videos: keeps paging through the catalog as you scroll
+	const chMore = document.getElementById("chmore");
+	const chGrid = chMore && chMore.previousElementSibling;
+	if (chMore && chGrid && d.continuation) {
+		let cont = d.continuation, busy = false;
+		const have = new Set(vids.map((x) => x.id));
+		const chObs = new IntersectionObserver(async (ents) => {
+			if (busy || !cont || !ents.some((x) => x.isIntersecting)) return;
+			busy = true;
+			try {
+				const d2 = await api("channel?id=" + encodeURIComponent(id) + "&cont=" + encodeURIComponent(cont));
+				cont = d2.continuation || "";
+				const fresh = (d2.videos || []).filter((it) => it && it.id && !have.has(it.id));
+				fresh.forEach((it) => have.add(it.id));
+				if (fresh.length) chGrid.insertAdjacentHTML("beforeend", fresh.map(card).join(""));
+			} catch (e) {}
+			busy = false;
+			if (!cont) chObs.disconnect();
+		}, { rootMargin: "900px" });
+		chObs.observe(chMore);
+	}
 	document.getElementById("subbtn").addEventListener("click", () => {
 		toggleSub(d.name, d.id || "");
 		const b = document.getElementById("subbtn");

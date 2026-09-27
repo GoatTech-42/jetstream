@@ -133,14 +133,14 @@ async function innertube(videoId) {
 	throw lastErr || new Error("innertube failed");
 }
 // channel + playlist pages come from the WEB innertube browse endpoint.
-async function innertubeBrowse(browseId) {
+async function innertubeBrowse(browseId, cont, params) {
 	let lastErr = null;
 	for (const key of INNERTUBE_KEYS) {
 		try {
 			const r = await fetch("https://www.youtube.com/youtubei/v1/browse?key=" + key, {
 				method: "POST",
 				headers: { "content-type": "application/json", "user-agent": WEB_UA },
-				body: JSON.stringify({ context: { client: { clientName: "WEB", clientVersion: "2.20240926.00.00", hl: "en" } }, browseId }),
+				body: JSON.stringify({ context: { client: { clientName: "WEB", clientVersion: "2.20240926.00.00", hl: "en" } }, ...(cont ? { continuation: cont } : { browseId, ...(params ? { params } : {}) }) }),
 				signal: AbortSignal.timeout(15000),
 			});
 			if (!r.ok) { lastErr = new Error("browse " + r.status); continue; }
@@ -405,10 +405,37 @@ export default async function handle(req, res, route, url, ctx) {
 			}));
 			return json(res, 200, { ok: true, items }, req);
 		}
+		function gridContToken(d) {
+			for (const cir of walkAll(d, "continuationItemRenderer")) {
+				const t = cir && cir.continuationEndpoint && cir.continuationEndpoint.continuationCommand && cir.continuationEndpoint.continuationCommand.token;
+				if (t) return t;
+			}
+			return "";
+		}
 		if (route === "channel" && req.method === "GET") {
+			const pvidsHome = (v) => v.filter((x) => !x.live);
 			const id = (url.searchParams.get("id") || "").trim();
-			if (!/^[a-zA-Z0-9_-]{20,40}$/.test(id)) return json(res, 400, { error: "bad channel id" });
+			const cont = (url.searchParams.get("cont") || "").trim();
+			if (!cont && !/^[a-zA-Z0-9_-]{20,40}$/.test(id)) return json(res, 400, { error: "bad channel id" });
+			// continuation pages: just the next batch of videos + the next token
+			if (cont) {
+				const d2 = await innertubeBrowse(null, cont);
+				const seen2 = new Set(), vids2 = [];
+				for (const l of walkAll(d2, "lockupViewModel")) {
+					const it = lockupItem(l);
+					if (it && !seen2.has(it.id)) { seen2.add(it.id); vids2.push(it); }
+				}
+				const next2 = gridContToken(d2);
+				return json(res, 200, { ok: true, videos: vids2.filter((x) => !x.live), continuation: next2 }, req);
+			}
 			const d = await cached("browse:" + id, 10 * 60 * 1000, () => innertubeBrowse(id));
+			// the channel's own tab endpoints (params come from youtube, never hardcoded)
+			const tabParams = {};
+			for (const t of walkAll(d, "tabRenderer")) {
+				const title = String((t && t.title) || "").toLowerCase();
+				const p = t && t.endpoint && t.endpoint.browseEndpoint && t.endpoint.browseEndpoint.params;
+				if (p && !tabParams[title]) tabParams[title] = p;
+			}
 			const meta = walkAll(d, "channelMetadataRenderer")[0] || {};
 			const phr = walkAll(d, "pageHeaderRenderer").find((p) => p && p.content && p.content.pageHeaderViewModel);
 			const phv = phr ? phr.content.pageHeaderViewModel : null;
@@ -439,8 +466,70 @@ export default async function handle(req, res, route, url, ctx) {
 				const t = String(s.accessibilityText || "").replace(/, [\d.,]+ ?[a-z]* views? - play Short.*$/i, "");
 				shorts.push({ id: m[1], title: t, short: true, thumb: thumbFor(m[1]) });
 			}
-			const pvids = videos.filter((x) => !x.live);
-			return json(res, 200, { ok: true, id, name: meta.title || (phv && phv.title && phv.title.dynamicTextViewModel && phv.title.dynamicTextViewModel.text && phv.title.dynamicTextViewModel.text.content) || "", description: String(meta.description || "").slice(0, 600), subs: mtexts.join(" · "), avatar, videos: pvids.slice(0, 30), shorts: shorts.slice(0, 20), playlists: pls.slice(0, 12) }, req);
+			// videos tab: the real catalog grid + its own continuation (home-page
+			// shelves cap out ~24 and their tokens page the wrong thing)
+			let vids2 = pvidsHome(videos), chCont = "";
+			if (tabParams.videos) {
+				try {
+					const dv = await cached("browse:" + id + ":videos", 10 * 60 * 1000, () => innertubeBrowse(id, null, tabParams.videos));
+					const seen3 = new Set(), tv = [];
+					for (const l of walkAll(dv, "lockupViewModel")) {
+						const it = lockupItem(l);
+						if (it && !seen3.has(it.id)) { seen3.add(it.id); tv.push(it); }
+					}
+					if (tv.length) vids2 = tv.filter((x) => !x.live);
+					chCont = gridContToken(dv);
+				} catch (e) {}
+			}
+			// shorts + playlists tabs (home shelves often miss them entirely)
+			let shorts2 = shorts, pls2 = pls;
+			if (tabParams.shorts) {
+				try {
+					const ds = await cached("browse:" + id + ":shorts", 10 * 60 * 1000, () => innertubeBrowse(id, null, tabParams.shorts));
+					const ss = [], seen4 = new Set();
+					for (const l of walkAll(ds, "shortsLockupViewModel")) {
+						const m = /shorts-shelf-item-([a-zA-Z0-9_-]{11})/.exec(l.entityId || "");
+						if (!m || seen4.has(m[1])) continue;
+						seen4.add(m[1]);
+						const t = String(l.accessibilityText || "").replace(/, [\d.,]+ ?[a-z]* views? - play Short.*$/i, "");
+						ss.push({ id: m[1], title: t, short: true, thumb: thumbFor(m[1]) });
+					}
+					if (ss.length) shorts2 = ss;
+				} catch (e) {}
+			}
+			const plTab = tabParams.playlists || tabParams.shows;
+			if (plTab) {
+				try {
+					const dp = await cached("browse:" + id + ":playlists", 10 * 60 * 1000, () => innertubeBrowse(id, null, plTab));
+					const pp = [], seen5 = new Set();
+					const pushPl = (pid, title, thumbUrl) => {
+						if (!pid || !title || seen5.has(pid)) return;
+						seen5.add(pid);
+						pp.push({ id: pid, title, thumb: thumbUrl ? "/api/jetstream/img?u=" + b64(thumbUrl) : "" });
+					};
+					for (const l of walkAll(dp, "lockupViewModel")) {
+						const pl = lockupPl(l);
+						if (pl) pushPl(pl.id, pl.title, (pl.thumb.match(/u=(.*)$/) || [])[1] ? decodeURIComponent(pl.thumb.split("u=")[1]) : "");
+					}
+					// classic playlist grid + shows grid (shows are VL<playlistId> under the hood)
+					for (const g of walkAll(dp, "gridPlaylistRenderer")) {
+						const t = g.title && (g.title.simpleText || (g.title.runs && g.title.runs[0] && g.title.runs[0].text));
+						const th = g.thumbnail && g.thumbnail.thumbnails && g.thumbnail.thumbnails.slice(-1)[0];
+						pushPl(g.playlistId, t, th && th.url);
+					}
+					for (const g of walkAll(dp, "gridShowRenderer")) {
+						const t = g.title && (g.title.simpleText || (g.title.runs && g.title.runs[0] && g.title.runs[0].text));
+						const bid = g.navigationEndpoint && g.navigationEndpoint.browseEndpoint && g.navigationEndpoint.browseEndpoint.browseId;
+						const pid = bid && bid.startsWith("VL") ? bid.slice(2) : bid;
+						const th = g.thumbnailRenderer && g.thumbnailRenderer.showCustomThumbnailRenderer && g.thumbnailRenderer.showCustomThumbnailRenderer.thumbnail && g.thumbnailRenderer.showCustomThumbnailRenderer.thumbnail.thumbnails && g.thumbnailRenderer.showCustomThumbnailRenderer.thumbnail.thumbnails.slice(-1)[0];
+						pushPl(pid, t, th && th.url);
+					}
+					if (pp.length) pls2 = pp;
+				} catch (e) {}
+			}
+			const pvids = vids2;
+			const vidCount = (mtexts.find((t) => /[\d.,KM]+ videos?$/i.test(t)) || "").replace(/ videos?$/i, "");
+			return json(res, 200, { ok: true, id, name: meta.title || (phv && phv.title && phv.title.dynamicTextViewModel && phv.title.dynamicTextViewModel.text && phv.title.dynamicTextViewModel.text.content) || "", description: String(meta.description || "").slice(0, 600), subs: mtexts.join(" · "), vidCount, avatar, videos: pvids.slice(0, 30), continuation: chCont, shorts: shorts2.slice(0, 20), playlists: pls2.slice(0, 12) }, req);
 		}
 		if (route === "playlist" && req.method === "GET") {
 			const id = (url.searchParams.get("id") || "").trim();
