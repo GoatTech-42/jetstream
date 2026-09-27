@@ -580,8 +580,9 @@ async function showWatch(id) {
 		${hasStreams && qualities.length > 1 ? `<div class="wrow"><label class="dim" for="qual">quality</label><select class="quality" id="qual">${qualities.map((x, i) => `<option value="${i}"${i === startIdx ? " selected" : ""}>${esc(x.q)}${x.hd ? " hd" : ""}</option>`).join("")}</select></div>` : ""}
 		${d.description ? `<details class="desc"><summary>description</summary><pre>${esc(d.description)}</pre></details>` : ""}
 		${hasStreams ? '<details class="desc" id="cmtdetails"><summary id="cmtsummary">comments</summary><div class="cmts" id="cmts"><p class="dim" style="margin:6px 2px">loading comments...</p></div></details>' : ""}
-		${d.related && d.related.length ? '<h2 class="sec">up next</h2>' : ""}
-	</div>` + grid(store.settings.algo ? rankItems(d.related || []) : (d.related || []));
+	</div>`;
+	const rel = store.settings.algo ? rankItems(d.related || []) : (d.related || []);
+	view.innerHTML = `<div class="wcols">${view.innerHTML}<div class="railcol">${rel.length ? '<h2 class="sec">up next</h2>' : ""}${grid(rel)}</div></div>`;
 	document.getElementById("subbtn").addEventListener("click", () => {
 		toggleSub(d.uploader, d.chId || "");
 		const b = document.getElementById("subbtn");
