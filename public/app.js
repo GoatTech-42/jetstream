@@ -240,14 +240,26 @@ async function foryouPool() {
 	for (const h of store.history.slice(0, 2)) {
 		try { const w = await api("watch?v=" + encodeURIComponent(h.id)); add((w.related || []).slice(0, 6)); } catch (e) {}
 	}
-	foryouCache = pool;
+	// sparse-feed guard (9/26): with few synced subs the pool starves at ~5 videos.
+	// top up from the trending blend - rankItems still puts his signals first, so
+	// for-you stays his, just never empty. and never cache an empty pool: the first
+	// load raced a cold upstream, the refresh must not inherit it.
+	if (pool.length < 16) {
+		try { const t = await api("trending"); add((t.items || []).slice(0, 40)); } catch (e) {}
+	}
+	foryouCache = pool.length ? pool : null;
 	return pool;
 }
 async function showForYou() {
 	setTab("foryou");
 	view.innerHTML = skeleton();
 	const watched = new Set(store.history.map((h) => h.id));
-	const pool = (await foryouPool()).filter((it) => !watched.has(it.id));
+	let pool = (await foryouPool()).filter((it) => !watched.has(it.id));
+	if (!pool.length) {
+		await new Promise((r) => setTimeout(r, 2000));
+		foryouCache = null;
+		pool = (await foryouPool()).filter((it) => !watched.has(it.id));
+	}
 	if (!pool.length) {
 		view.innerHTML = store.subs.length
 			? '<div class="note"><p>your feed is warming up.</p><p class="dim" style="margin:0">the upstream is busy right now - try again in a bit.</p></div>'
@@ -292,8 +304,16 @@ async function showTrending() {
 	setTab("home");
 	view.innerHTML = skeleton();
 	try {
-		const d = await api("trending");
+		let d = await api("trending");
 		let items = store.settings.algo ? rankItems(d.items || []) : (d.items || []);
+		if (items.length < 8) {
+			await new Promise((r) => setTimeout(r, 2000));
+			try {
+				d = await api("trending");
+				const i2 = store.settings.algo ? rankItems(d.items || []) : (d.items || []);
+				if (i2.length > items.length) items = i2;
+			} catch (e) {}
+		}
 		if (items.length >= 8) {
 			view.innerHTML = grid(items);
 			const top = items.slice(0, 3);
