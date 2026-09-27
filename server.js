@@ -218,6 +218,18 @@ async function commentsFor(v) {
 	}
 	return { ok: true, count, likes, comments: comments.slice(0, 20) };
 }
+function lockupPl(l) {
+	if (!l || l.contentType !== "LOCKUP_CONTENT_TYPE_PLAYLIST") return null;
+	const md = l.metadata && l.metadata.lockupMetadataViewModel;
+	const title = (md && md.title && md.title.content) || "";
+	let thumb = "";
+	try {
+		const sources = l.contentImage.thumbnailViewModel.image.sources || [];
+		if (sources.length) thumb = "/api/jetstream/img?u=" + b64(sources[sources.length - 1].url);
+	} catch (e) {}
+	if (!l.contentId || !title) return null;
+	return { id: l.contentId, title, thumb };
+}
 async function watchViaInnertube(v) {
 	const d = await innertube(v);
 	const vd = d.videoDetails || {};
@@ -268,6 +280,16 @@ export default async function handle(req, res, route, url, ctx) {
 			const items = (d && Array.isArray(d.items) ? d.items : []).filter((x) => x && x.type === "stream" && x.url).map(item);
 			return json(res, 200, { ok: true, items: preferPlayable(items) }, req);
 		}
+		if (route === "search-channels" && req.method === "GET") {
+			const q = (url.searchParams.get("q") || "").trim();
+			if (!q) return json(res, 400, { error: "missing q" });
+			const d = await cachedApi("/search?q=" + encodeURIComponent(q) + "&filter=channels", 5 * 60 * 1000);
+			const items = (d && Array.isArray(d.items) ? d.items : []).filter((x) => x && x.type === "channel" && x.url).slice(0, 6).map((x) => ({
+				id: (x.url || "").split("/channel/").pop(), name: x.name || "", subs: x.subscriberCount > 0 ? x.subscriberCount : 0,
+				avatar: x.thumbnail ? "/api/jetstream/img?u=" + b64(x.thumbnail) : "", description: String(x.description || "").slice(0, 120),
+			}));
+			return json(res, 200, { ok: true, items }, req);
+		}
 		if (route === "search-playlists" && req.method === "GET") {
 			const q = (url.searchParams.get("q") || "").trim();
 			if (!q) return json(res, 400, { error: "missing q" });
@@ -299,6 +321,11 @@ export default async function handle(req, res, route, url, ctx) {
 				const it = lockupItem(l);
 				if (it && !seen.has(it.id)) { seen.add(it.id); videos.push(it); }
 			}
+			const pls = [];
+			for (const l of walkAll(d, "lockupViewModel")) {
+				const pl = lockupPl(l);
+				if (pl && !seen.has(pl.id)) { seen.add(pl.id); pls.push(pl); }
+			}
 			const shorts = [];
 			for (const s of walkAll(d, "shortsLockupViewModel")) {
 				const m = /shorts-shelf-item-([a-zA-Z0-9_-]{11})/.exec(s.entityId || "");
@@ -307,7 +334,7 @@ export default async function handle(req, res, route, url, ctx) {
 				const t = String(s.accessibilityText || "").replace(/, [\d.,]+ ?[a-z]* views? - play Short.*$/i, "");
 				shorts.push({ id: m[1], title: t, short: true, thumb: thumbFor(m[1]) });
 			}
-			return json(res, 200, { ok: true, id, name: meta.title || (phv && phv.title && phv.title.dynamicTextViewModel && phv.title.dynamicTextViewModel.text && phv.title.dynamicTextViewModel.text.content) || "", description: String(meta.description || "").slice(0, 600), subs: mtexts.join(" · "), avatar, videos: videos.slice(0, 30), shorts: shorts.slice(0, 20) }, req);
+			return json(res, 200, { ok: true, id, name: meta.title || (phv && phv.title && phv.title.dynamicTextViewModel && phv.title.dynamicTextViewModel.text && phv.title.dynamicTextViewModel.text.content) || "", description: String(meta.description || "").slice(0, 600), subs: mtexts.join(" · "), avatar, videos: videos.slice(0, 30), shorts: shorts.slice(0, 20), playlists: pls.slice(0, 12) }, req);
 		}
 		if (route === "playlist" && req.method === "GET") {
 			const id = (url.searchParams.get("id") || "").trim();

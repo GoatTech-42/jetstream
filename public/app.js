@@ -225,17 +225,39 @@ async function showSearch(q) {
 	try {
 		const d = await api("search?q=" + encodeURIComponent(q));
 		const items = d.items || [];
-		view.innerHTML = `<h2 class="sec pad" style="padding-bottom:0">results for "${esc(q)}"</h2><div id="plrow"></div>` +
-			(items.length ? grid(items) : '<p class="dim pad">no videos matched that.</p>');
-		api("search-playlists?q=" + encodeURIComponent(q)).then((p) => {
-			const pls = (p && p.items) || [];
-			const el = document.getElementById("plrow");
-			if (!el || !pls.length) return;
-			el.innerHTML = '<div class="plrow">' + pls.map((pl) => `<a class="plcard" href="#/p/${esc(pl.id)}">
-				${pl.thumb ? `<img loading="lazy" src="${esc(pl.thumb)}" alt="">` : ""}
-				<span class="plinfo"><b>${esc(pl.title)}</b><span class="dim">playlist${pl.count ? " · " + pl.count + " videos" : ""}${pl.uploader ? " · " + esc(pl.uploader) : ""}</span></span>
-			</a>`).join("") + "</div>";
-		}).catch(() => {});
+		view.innerHTML = `<h2 class="sec pad" style="padding-bottom:0">results for "${esc(q)}"</h2>
+		<div class="fchips pad" style="padding-top:8px;padding-bottom:0" id="fchips">
+			<button class="fchip on" data-f="videos">videos</button><button class="fchip" data-f="channels">channels</button><button class="fchip" data-f="playlists">playlists</button>
+		</div><div id="sresults">` + (items.length ? grid(items) : '<p class="dim pad">no videos matched that.</p>') + "</div>";
+		const resultsEl = document.getElementById("sresults");
+		const searches = {
+			videos: () => api("search?q=" + encodeURIComponent(q)).then((d) => (d.items && d.items.length ? grid(store.settings.algo ? rankItems(d.items) : d.items) : '<p class="dim pad">no videos matched that.</p>')),
+			channels: () => api("search-channels?q=" + encodeURIComponent(q)).then((d) => {
+				const cs = (d && d.items) || [];
+				if (!cs.length) return '<p class="dim pad">no channels matched that.</p>';
+				return '<div class="plrow">' + cs.map((c) => `<a class="plcard" href="#/c/${esc(c.id)}">
+					${c.avatar ? `<img loading="lazy" src="${esc(c.avatar)}" alt="" style="border-radius:50%">` : ""}
+					<span class="plinfo"><b>${esc(c.name)}</b><span class="dim">${c.subs > 0 ? fmtViews(c.subs).replace("views", "subscribers") : "channel"}${c.description ? " · " + esc(c.description) : ""}</span></span>
+				</a>`).join("") + "</div>";
+			}),
+			playlists: () => api("search-playlists?q=" + encodeURIComponent(q)).then((p) => {
+				const pls = (p && p.items) || [];
+				if (!pls.length) return '<p class="dim pad">no playlists matched that.</p>';
+				return '<div class="plrow">' + pls.map((pl) => `<a class="plcard" href="#/p/${esc(pl.id)}">
+					${pl.thumb ? `<img loading="lazy" src="${esc(pl.thumb)}" alt="">` : ""}
+					<span class="plinfo"><b>${esc(pl.title)}</b><span class="dim">playlist${pl.count ? " · " + pl.count + " videos" : ""}${pl.uploader ? " · " + esc(pl.uploader) : ""}</span></span>
+				</a>`).join("") + "</div>";
+			}),
+		};
+		for (const b of document.querySelectorAll(".fchip")) {
+			b.addEventListener("click", () => {
+				if (b.classList.contains("on")) return;
+				for (const x of document.querySelectorAll(".fchip")) x.classList.remove("on");
+				b.classList.add("on");
+				resultsEl.innerHTML = skeleton();
+				(searches[b.dataset.f] || searches.videos)().then((html) => { resultsEl.innerHTML = html; }).catch(() => { resultsEl.innerHTML = '<p class="dim pad">that search failed - try again.</p>'; });
+			});
+		}
 	} catch (e) { errBox("search failed - give it another try."); }
 }
 
@@ -248,6 +270,7 @@ async function showChannel(id) {
 	const subbed = isSubbed(d.name);
 	const vids = d.videos || [];
 	const shorts = d.shorts || [];
+	const pls = d.playlists || [];
 	view.innerHTML = `<div class="chhead">
 		${d.avatar ? `<img class="chavatar" src="${esc(d.avatar)}" alt="">` : ""}
 		<div class="chinfo">
@@ -259,6 +282,10 @@ async function showChannel(id) {
 	${vids.length ? `<div class="pad" style="padding-top:0"><button class="plain" id="playall">play all (${vids.length})</button></div>` : ""}
 	${d.description ? `<details class="desc pad" style="padding-top:0"><summary>about</summary><pre>${esc(d.description)}</pre></details>` : ""}
 	${shorts.length ? `<h2 class="sec">shorts</h2><div class="shortrow">${shorts.map(shortCard).join("")}</div>` : ""}
+	${pls.length ? `<h2 class="sec">playlists</h2><div class="plrow">${pls.map((pl) => `<a class="plcard" href="#/p/${esc(pl.id)}">
+		${pl.thumb ? `<img loading="lazy" src="${esc(pl.thumb)}" alt="">` : ""}
+		<span class="plinfo"><b>${esc(pl.title)}</b><span class="dim">playlist</span></span>
+	</a>`).join("")}</div>` : ""}
 	${vids.length ? '<h2 class="sec">videos</h2>' + grid(vids) : ""}
 	${!vids.length && !shorts.length ? '<p class="dim pad">no videos found on this channel.</p>' : ""}`;
 	document.getElementById("subbtn").addEventListener("click", () => {
