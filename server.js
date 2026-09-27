@@ -595,6 +595,11 @@ export default async function handle(req, res, route, url, ctx) {
 			const v = (url.searchParams.get("v") || "").trim();
 			if (!/^[a-zA-Z0-9_-]{11}$/.test(v)) return json(res, 400, { error: "bad video id" });
 			try {
+				if (url.searchParams.has("fresh")) {
+					const d = await watchViaInnertube(v);
+					apiCache.set("watch:" + v, { data: d, ts: Date.now() });
+					return json(res, 200, d, req);
+				}
 				return json(res, 200, await cached("watch:" + v, 5 * 60 * 1000, () => watchViaInnertube(v)), req);
 			} catch (e) {}
 			const d = await cachedApi("/streams/" + v, 5 * 60 * 1000);
