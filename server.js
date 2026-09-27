@@ -382,13 +382,18 @@ export default async function handle(req, res, route, url, ctx) {
 			// only playable videos backfill.
 			if (items.length < 12) {
 				try {
-					const yt = await cached("yttrending", 10 * 60 * 1000, () => innertubeBrowse("FEtrending"));
-					const extra = searchItems(yt).items;
+					// FEtrending 400s on every client now (9/26) - backfill from broad
+					// innertube searches instead; searchItems already drops lives.
+					const seeds = ["official music video", "official trailer", "gameplay", "highlights", "podcast"];
 					const have = new Set(items.map((x) => x.id));
-					for (const e of extra) {
-						if (items.length >= 30 || have.has(e.id)) continue;
-						have.add(e.id);
-						items.push(e);
+					for (const q of seeds) {
+						if (items.length >= 24) break;
+						const d = await cached("ytseed:" + q, 10 * 60 * 1000, () => innertubeSearch({ query: q, params: "EgIQAQ==" }));
+						for (const e of searchItems(d).items) {
+							if (items.length >= 24 || have.has(e.id)) continue;
+							have.add(e.id);
+							items.push(e);
+						}
 					}
 				} catch (e) {}
 			}
