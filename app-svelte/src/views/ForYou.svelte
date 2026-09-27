@@ -9,7 +9,7 @@
 
 	let items = null;      // null = loading
 	let empty = null;      // 'cold' | 'warm'
-	let expanding = 0, busy = false;
+	let expanding = 0, busy = false, refreshing = false;
 	let have = new Set();
 
 	// continue watching: anything with a resume point worth showing
@@ -69,10 +69,18 @@
 		busy = false;
 	}
 
+	async function refresh() {
+		if (refreshing) return;
+		refreshing = true;
+		items = null; empty = null; expanding = 0;
+		await load();
+		refreshing = false;
+	}
 	onMount(load);
 </script>
 
 <div class="viewfade">
+<div class="feedbar"><span class="flabel">for you</span><button class="refreshbtn" class:spin={refreshing} on:click={refresh}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M20 11A8 8 0 1 0 18.9 14"/><path d="M20 5v6h-6"/></svg>refresh</button></div>
 {#if resumeRail.length}
 	<div class="sec"><h2>continue watching</h2></div>
 	<div class="rail">

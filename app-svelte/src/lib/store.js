@@ -95,24 +95,36 @@ export function removeLater(id) { store.update((s) => ({ ...s, later: s.later.fi
 export function setSetting(k, v) { store.update((s) => ({ ...s, settings: { ...s.settings, [k]: v } })); persist(); }
 export function wipeHistory() { store.update((s) => ({ ...s, history: [], progress: {} })); persist(); }
 
-// jetstream's own ranking: subs + watch-history signal. off = plain order.
+// jetstream's own ranking v2: subs + recency-weighted watch affinity + popularity.
+// off = plain order. signals, in weight order:
+//  +6  uploader is subscribed (his strongest stated preference)
+//  +0-4 recency-weighted watch affinity: recent watches of that uploader count
+//       more than old ones (history is newest-first; weight = 1/(1 + idx/6))
+//  +0-2 popularity: log10 views, 1k views ~ 0, 10M ~ +2 (quality prior, capped
+//       so it can't drown the personal signals)
+//  -8  already watched
+//  -100 live (lives can't play here yet - sink, never drop)
+// ties break on views, so equal-score items surface best-known first.
 export function rankItems(s, items) {
 	const subbed = new Set(s.subs.map((x) => x.name.toLowerCase()));
 	const histU = new Map();
 	const seen = new Set();
-	for (const h of s.history) {
+	s.history.forEach((h, i) => {
 		const u = (h.uploader || "").toLowerCase();
-		if (u) histU.set(u, (histU.get(u) || 0) + 1);
+		if (u) histU.set(u, (histU.get(u) || 0) + 1 / (1 + i / 6));
 		seen.add(h.id);
-	}
+	});
 	return items.map((it, i) => {
 		const u = (it.uploader || "").toLowerCase();
+		const v = Number(it.views) || 0;
 		let score = 0;
 		if (subbed.has(u)) score += 6;
 		score += Math.min(4, histU.get(u) || 0);
+		if (v > 0) score += Math.min(2, Math.max(0, Math.log10(v) - 3));
 		if (seen.has(it.id)) score -= 8;
-		return [score, i, it];
-	}).sort((a, b) => b[0] - a[0] || a[1] - b[1]).map((x) => x[2]);
+		if (it.live) score -= 100;
+		return [score, v, i, it];
+	}).sort((a, b) => b[0] - a[0] || b[1] - a[1] || a[2] - b[2]).map((x) => x[3]);
 }
 
 export function startQueue(label, items) {

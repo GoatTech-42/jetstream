@@ -49,14 +49,18 @@
 {:else if err}
 	<div class="note"><p>couldn't load that channel.</p><button class="btn" on:click={() => { err = false; load(); }}>retry</button></div>
 {:else}
-	<div class="chhead">
-		{#if d.avatar}<img class="chavatar" src={d.avatar} alt="">{/if}
-		<div class="chinfo">
-			<p class="chname">{d.name}</p>
-			{#if d.subs}<p class="dim" style="margin:3px 0 0">{d.subs}</p>
-			{:else if d.vidCount}<p class="dim" style="margin:3px 0 0">{d.vidCount} videos</p>{/if}
+	<div class="chhead2">
+		{#if d.avatar}<img class="chavatar2" src={d.avatar} alt="">{/if}
+		<div class="chinfo2">
+			<p class="chname2">{d.name}</p>
+			<p class="chmeta2">{[d.subs, d.vidCount ? d.vidCount + " videos" : ""].filter(Boolean).join(" · ")}</p>
+			{#if d.description}<button class="chdesc2" on:click={() => (tab = "about")}>{d.description}</button>{/if}
+			<div class="chactions">
+				<button class="pill2" class:subbed on:click={sub}>{subbed ? "subscribed" : "subscribe"}</button>
+				{#if vids.length}<button class="pill2 ghost" on:click={() => startQueue(d.name, vids)}>
+					<svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M8 5v14l11-7z"/></svg>play all</button>{/if}
+			</div>
 		</div>
-		<button class="btn amber" class:on={subbed} on:click={sub}>{subbed ? "subscribed" : "subscribe"}</button>
 	</div>
 	<div class="chtabs">
 		{#if vids.length}<button class="chtab" class:on={tab === "videos"} on:click={() => (tab = "videos")}>videos</button>{/if}
@@ -67,7 +71,6 @@
 
 	{#if tab === "videos"}
 		{#if vids.length}
-			<div class="pad" style="padding-bottom:0"><button class="btn" on:click={() => startQueue(d.name, vids)}>play all</button></div>
 			<div class="grid">{#each vids as it, i (it.id)}<VideoCard {it} style="animation-delay:{Math.min(i, 12) * 25}ms" />{/each}</div>
 			{#if cont}<Sentinel on:reach={more} />{/if}
 		{:else if !(d.shorts || []).length}

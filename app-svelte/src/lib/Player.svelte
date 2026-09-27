@@ -14,11 +14,12 @@
 	let speed = 1;
 	let hideui = false;
 	let qopen = false;
-	let curQ = d._startIdx || 0;
+	export let curQ = d._startIdx || 0;
+	let appliedQ = -1;
 	let flashes = [];
 	let au = null;
 	let lastSave = 0, firstMeta = true, pendingSeek = null;
-	let hideT = null, auTimer = null;
+	let hideT = null, auTimer = null, pollTimer = null, audioBridge = null;
 	const RATES = [1, 1.25, 1.5, 2, 0.75];
 
 	function qualities() { return d._qualities || []; }
@@ -38,11 +39,17 @@
 	}
 	function dropAudio() { if (au) { au.pause(); au.remove(); au = null; } }
 
-	function pickQuality(i) {
+	// curQ is bindable: Watch renders a quality row under the player.
+	// The reactive below applies any external change; the first run just syncs.
+	$: if (curQ !== appliedQ) {
+		const first = appliedQ === -1;
+		appliedQ = curQ;
+		if (!first && v) applyQuality(curQ);
+	}
+	function applyQuality(i) {
 		const q = qualities()[i];
-		if (!q || i === curQ) { qopen = false; return; }
+		if (!q) return;
 		const tt = v.currentTime, wasPlaying = !v.paused;
-		curQ = i;
 		if (q.hd && d._hdAudio) {
 			ensureAudio();
 			v.muted = true;
@@ -54,11 +61,24 @@
 			v.src = q.src;
 		}
 		pendingSeek = tt;
-		if (wasPlaying) v.play().catch(() => {});
-		qopen = false;
+		if (wasPlaying) {
+			if (au) au.play().catch(() => {});
+			v.play().catch(() => {});
+		}
 	}
 
-	function toggle() { if (v.paused) v.play().catch(() => {}); else v.pause(); }
+	function toggle() {
+		if (v.paused) {
+			if (d._hdAudio && qualities()[curQ] && qualities()[curQ].hd) {
+				ensureAudio();
+				if (au) { syncAudio(true); au.play().catch(() => {}); }
+			}
+			v.play().catch(() => {});
+		} else {
+			v.pause();
+			if (au) au.pause();
+		}
+	}
 	function showUI() {
 		hideui = false;
 		clearTimeout(hideT);
@@ -75,6 +95,7 @@
 		else if (v.webkitEnterFullscreen) v.webkitEnterFullscreen();
 	}
 	function onTime() {
+		playing = !v.paused && !v.ended;
 		if (Date.now() - lastSave > 5000) { lastSave = Date.now(); setProgress(d.id, v.currentTime); }
 		t = v.currentTime; dur = v.duration || 0;
 		try { if (v.buffered.length && dur) bufPct = (v.buffered.end(v.buffered.length - 1) / dur) * 100; } catch (e) {}
@@ -86,6 +107,7 @@
 		dur = v.duration || 0;
 	}
 	function onEnded() {
+		playing = false;
 		setProgress(d.id, 0);
 		if (!$store.settings.autoplayNext) return;
 		const qn = queueNext($queue, d.id);
@@ -93,7 +115,7 @@
 		const nxt = (d.related || [])[0];
 		if (nxt) location.hash = "#/w/" + nxt.id;
 	}
-	function onPause() { setProgress(d.id, v.currentTime); playing = false; showUI(); }
+	function onPause() { setProgress(d.id, v.currentTime); if (au) au.pause(); playing = false; showUI(); }
 	function pagehide() { setProgress(d.id, v.currentTime); }
 
 	// seek bar: tap or drag
@@ -173,9 +195,15 @@
 			if (au) { au.muted = false; au.volume = 1; }
 		}
 		muted = v.muted; vol = v.volume;
+		v.play().catch(() => {});
 		hasCc = !!(v.textTracks && v.textTracks.length);
 		if (hasCc) ccOn = v.textTracks[0].mode === "showing";
 		hasPip = !!(document.pictureInPictureEnabled || v.webkitSupportsPresentationMode);
+		pollTimer = setInterval(() => {
+			if (!v) return;
+			playing = !v.paused && !v.ended;
+			muted = v.muted; vol = v.volume; t = v.currentTime;
+		}, 250);
 		auTimer = setInterval(() => {
 			if (!v || !v.isConnected) { clearInterval(auTimer); return; }
 			if (!au) return;
@@ -185,13 +213,19 @@
 		}, 600);
 		window.addEventListener("pagehide", pagehide);
 		document.addEventListener("keydown", keydown);
+		// iOS/WKWebView: audio elements can't start without a gesture - the first
+		// tap anywhere bridges sound for an already-playing HD pair.
+		audioBridge = () => { if (v && !v.paused && au && au.paused) { syncAudio(true); au.play().catch(() => {}); } };
+		document.addEventListener("touchstart", audioBridge, { passive: true });
+		document.addEventListener("click", audioBridge);
 	});
 	onDestroy(() => {
-		clearInterval(auTimer);
+		clearInterval(auTimer); clearInterval(pollTimer);
 		clearTimeout(hideT);
 		dropAudio();
 		window.removeEventListener("pagehide", pagehide);
 		document.removeEventListener("keydown", keydown);
+		if (audioBridge) { document.removeEventListener("touchstart", audioBridge); document.removeEventListener("click", audioBridge); }
 	});
 
 	$: pct = dur ? (t / dur) * 100 : 0;
@@ -222,7 +256,7 @@
 			<div class="pseek-fill" style="width:{pct}%"></div>
 		</div>
 		<div class="prow">
-			<button class="pbtn" aria-label="Play/pause" on:click={() => { toggle(); showUI(); }}>{@html playing ? ICON.pause : ICON.play}</button>
+			<button class="pbtn" aria-label="Play/pause" on:click={() => { toggle(); showUI(); }}>{#if playing}{@html ICON.pause}{:else}{@html ICON.play}{/if}</button>
 			<span class="ptime">{fmtT(t)} / {fmtT(dur)}</span>
 			<span class="pgap"></span>
 			<button class="pbtn" aria-label="Mute" on:click={() => { v.muted = !v.muted; showUI(); }}>{@html muted || vol === 0 ? ICON.mute : ICON.vol}</button>
@@ -238,7 +272,7 @@
 	{#if qopen}
 		<div class="qmenu">
 			{#each qualities() as q, i}
-				<button class:on={i === curQ} on:click={() => pickQuality(i)}><span>{q.q}</span>{#if q.hd}<span class="hd">hd</span>{/if}</button>
+				<button class:on={i === curQ} on:click={() => { curQ = i; qopen = false; showUI(); }}><span>{q.q}</span>{#if q.hd}<span class="hd">hd</span>{/if}</button>
 			{/each}
 		</div>
 	{/if}

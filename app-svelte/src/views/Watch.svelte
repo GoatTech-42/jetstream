@@ -13,6 +13,7 @@
 	export let id = "";
 	let d = null, err = false;
 	let resume = 0, startIdx = 0, hasStreams = false;
+	let curQ = 0;
 	let comments = null, commentsErr = false, commentsOpen = false;
 	let commentCount = "", likeMeta = "";
 	let cmtDetails;
@@ -89,9 +90,17 @@
 <div class="watchcols viewfade">
 	<div class="watchwrap">
 		{#if hasStreams}
-			<Player {d} {resume} />
+			<Player {d} {resume} bind:curQ />
 		{:else}
 			<div class="note">{d.live ? "this one's live - live playback isn't supported yet." : "no playable stream for this video."}</div>
+		{/if}
+		{#if hasStreams && d._qualities && d._qualities.length > 1}
+			<div class="qsel">
+				<span class="qsel-label">quality</span>
+				{#each d._qualities as q, i}
+					<button class="qselchip" class:on={i === curQ} on:click={() => (curQ = i)}><span>{q.q}</span>{#if q.hd}<span class="hd">hd</span>{/if}</button>
+				{/each}
+			</div>
 		{/if}
 		{#if qIdx >= 0}<p class="qchip">playing all · {$queue.label} · {qIdx + 1}/{$queue.items.length}</p>{/if}
 		<p class="wtitle">{d.title}</p>

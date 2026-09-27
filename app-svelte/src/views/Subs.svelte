@@ -5,7 +5,7 @@
 	import VideoCard from "../lib/VideoCard.svelte";
 	import SkelGrid from "../lib/SkelGrid.svelte";
 
-	let feed = null, feedErr = false;
+	let feed = null, feedErr = false, refreshing = false;
 	$: subLink = (s) => (s.chId ? "#/c/" + encodeURIComponent(s.chId) : "#/s/" + encodeURIComponent(s.name));
 
 	async function loadFeed() {
@@ -26,6 +26,13 @@
 			feed = merged.slice(0, 24);
 		} catch (e) { feedErr = true; feed = []; }
 	}
+	async function refresh() {
+		if (refreshing) return;
+		refreshing = true;
+		feed = null; feedErr = false;
+		await loadFeed();
+		refreshing = false;
+	}
 	onMount(() => { if ($store.subs.length) loadFeed(); });
 </script>
 
@@ -33,7 +40,8 @@
 {#if !$store.subs.length}
 	<div class="note"><p>no subscriptions yet.</p><p class="dim">hit subscribe on any watch page and that channel lands here, synced to your ramjet account.</p></div>
 {:else}
-	<div class="sec"><h2>subscriptions</h2></div>
+	<div class="feedbar"><span class="flabel">subscriptions</span><button class="refreshbtn" class:spin={refreshing} on:click={refresh}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M20 11A8 8 0 1 0 18.9 14"/><path d="M20 5v6h-6"/></svg>refresh</button></div>
+	<div class="sec"><h2>channels</h2></div>
 	<div class="subs">
 		{#each $store.subs as s (s.name)}
 			<div class="subrow">

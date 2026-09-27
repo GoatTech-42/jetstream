@@ -6,7 +6,7 @@
 	import VideoCard from "../lib/VideoCard.svelte";
 	import SkelGrid from "../lib/SkelGrid.svelte";
 
-	let items = null, extra = [], err = "", liveNote = false;
+	let items = null, extra = [], err = "", liveNote = false, refreshing = false;
 
 	async function load() {
 		try {
@@ -43,6 +43,13 @@
 			if (!its.length && !extra.length) { err = "empty"; }
 		} catch (e) { err = "fail"; }
 	}
+	async function refresh() {
+		if (refreshing) return;
+		refreshing = true;
+		items = null; extra = []; err = ""; liveNote = false;
+		await load();
+		refreshing = false;
+	}
 	onMount(load);
 </script>
 
@@ -54,6 +61,7 @@
 {:else if err === "empty"}
 	<div class="note"><p>trending is all live right now and lives can't play here yet.</p><p class="dim">search works meanwhile - or subscribe to a channel and your for-you tab takes over.</p></div>
 {:else}
+	<div class="feedbar"><span class="flabel">trending</span><button class="refreshbtn" class:spin={refreshing} on:click={refresh}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M20 11A8 8 0 1 0 18.9 14"/><path d="M20 5v6h-6"/></svg>refresh</button></div>
 	{#if !items.length && liveNote}<p class="dim pad" style="padding-bottom:0">trending is wall-to-wall live right now - lives stay hidden since they can't play here.</p>{/if}
 	{#if items.length}<div class="grid">{#each items as it, i (it.id)}<VideoCard {it} style="animation-delay:{Math.min(i, 12) * 30}ms" />{/each}</div>{/if}
 	{#if extra.length}<div class="sec"><h2>meanwhile, for you</h2></div><div class="grid">{#each extra as it (it.id)}<VideoCard {it} />{/each}</div>{/if}

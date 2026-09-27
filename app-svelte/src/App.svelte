@@ -1,4 +1,6 @@
 <script>
+	const BUILD = __BUILD_ID__;
+	console.log("jetstream build", BUILD);
 	import { onMount } from "svelte";
 	import { store, loadLocal, loadRemote, applyRamjetTheme, wipeHistoryOnExit } from "./lib/store.js";
 	import { api } from "./lib/api.js";
@@ -91,6 +93,7 @@
 		<a class="brand" href="/" title="back to ramjet">
 			<svg class="mark" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path fill="var(--amber)" d="M11.6 39.6 L14.4 42.4 L4.7 50.7 L3.3 49.3 Z"/><path fill="var(--amber)" d="M20.6 48.6 L23.4 51.4 L15.7 57.7 L14.3 56.3 Z"/><path fill="var(--amber-deep)" d="M58 6 L12 22 L30 32 Z"/><path fill="var(--amber)" d="M58 6 L30 32 L40 50 Z"/></svg>
 			<span class="word">jet<em>stream</em></span>
+			<span class="buildtag" title="build">{BUILD}</span>
 		</a>
 		<form class="searchbox" autocomplete="off" spellcheck="false" on:submit|preventDefault={submit}>
 			<svg class="sic" viewBox="0 0 24 24"><path fill="currentColor" d="M15.5 14h-.79l-.28-.27a6.5 6.5 0 1 0-.7.7l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0A4.5 4.5 0 1 1 14 9.5 4.5 4.5 0 0 1 9.5 14z"/></svg>
