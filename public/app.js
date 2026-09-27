@@ -5,10 +5,39 @@
 const view = document.getElementById("view");
 const qInput = document.getElementById("q");
 const LS_KEY = "jetstream-store";
-const DEFAULT_SETTINGS = { autoplayNext: true, resume: true, quality: "auto" };
+const DEFAULT_SETTINGS = { autoplayNext: true, resume: true, quality: "auto", algo: true };
+
+// -- theme: follow ramjet's own theme -----------------------------------------
+// ramjet persists appearance settings same-origin under "rj.settings"; when its
+// encrypted sync pulls settings on another device it writes the same key, so
+// jetstream just mirrors it. lowData there also gates our prefetch warming.
+const RJ_THEMES = { amber: ["#ffa028", "#c96f04"], mint: ["#34d399", "#059669"], sky: ["#38bdf8", "#0369a1"], violet: ["#a78bfa", "#6d28d9"], ember: ["#f87171", "#b91c1c"] };
+let rjLowData = false;
+function rjShade(hex, amt) {
+	const n = parseInt(hex.slice(1), 16);
+	const ch = (v) => Math.max(0, Math.min(255, Math.round(v * (1 + amt))));
+	return "#" + [ch(n >> 16), ch((n >> 8) & 255), ch(n & 255)].map((v) => v.toString(16).padStart(2, "0")).join("");
+}
+function applyRamjetTheme() {
+	let s = null;
+	try { s = JSON.parse(localStorage.getItem("rj.settings") || "null"); } catch (e) {}
+	let pair = RJ_THEMES.amber;
+	if (s && typeof s === "object") {
+		rjLowData = !!s.lowData;
+		if (s.theme === "custom") {
+			const a = /^#[0-9a-fA-F]{6}$/.test(s.customAccent || "") ? s.customAccent : "#ffa028";
+			pair = [a, rjShade(a, -0.35)];
+		} else if (RJ_THEMES[s.theme]) pair = RJ_THEMES[s.theme];
+	}
+	document.documentElement.style.setProperty("--amber", pair[0]);
+	document.documentElement.style.setProperty("--amber-deep", pair[1]);
+}
+applyRamjetTheme();
 
 let store = { history: [], progress: {}, settings: { ...DEFAULT_SETTINGS }, subs: [] };
 let saveQueued = false;
+// play-all queue (channel pages, playlists) - lives only in this page session
+let queue = null; // { label, items: [{id,title,...}], }
 
 function esc(s) { return String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
 
@@ -25,6 +54,13 @@ async function api(path) {
 		}
 	}
 }
+
+// -- speed: warm the server cache before he taps ------------------------------
+function idle(fn) {
+	if ("requestIdleCallback" in window) requestIdleCallback(fn, { timeout: 4000 });
+	else setTimeout(fn, 1600);
+}
+function prefetch(path) { if (rjLowData) return; fetch("/api/jetstream/" + path).catch(() => {}); }
 
 // -- per-user store -----------------------------------------------------------
 function norm(s) {
@@ -87,6 +123,41 @@ function toggleSub(name, chId) {
 	save();
 }
 
+// -- queue ----------------------------------------------------------------------
+function startQueue(label, items) {
+	if (!items || !items.length) return;
+	queue = { label, items };
+	location.hash = "#/w/" + items[0].id;
+}
+function queueNext(id) {
+	if (!queue) return null;
+	const i = queue.items.findIndex((x) => x.id === id);
+	if (i < 0 || i + 1 >= queue.items.length) return null;
+	return queue.items[i + 1];
+}
+
+// -- for-you ranking ----------------------------------------------------------
+// jetstream's own algorithm: score listings by the per-user signal already in
+// the synced blob (subs + watch history). off in settings = plain order.
+function rankItems(items) {
+	const subbed = new Set(store.subs.map((s) => s.name.toLowerCase()));
+	const histU = new Map();
+	const seen = new Set();
+	for (const h of store.history) {
+		const u = (h.uploader || "").toLowerCase();
+		if (u) histU.set(u, (histU.get(u) || 0) + 1);
+		seen.add(h.id);
+	}
+	return items.map((it, i) => {
+		const u = (it.uploader || "").toLowerCase();
+		let score = 0;
+		if (subbed.has(u)) score += 6;                    // channels he chose
+		score += Math.min(4, histU.get(u) || 0);          // channels he keeps watching
+		if (seen.has(it.id)) score -= 8;                  // already watched sinks
+		return [score, i, it];
+	}).sort((a, b) => b[0] - a[0] || a[1] - b[1]).map((x) => x[2]);
+}
+
 // -- rendering ----------------------------------------------------------------
 function fmtViews(v) {
 	v = Number(v) || 0;
@@ -95,10 +166,11 @@ function fmtViews(v) {
 	return v + " views";
 }
 function card(it) {
-	const meta = [it.uploader, it.views ? fmtViews(it.views) : "", it.resume || ""].filter(Boolean).join(" · ");
+	const meta = it.metaText || [it.uploader, it.views ? fmtViews(it.views) : "", it.resume || ""].filter(Boolean).join(" · ");
 	const pct = it.progressPct ? `<div class="watched"><div style="width:${Math.min(100, it.progressPct)}%"></div></div>` : "";
+	const badge = it.short ? '<span class="dur">short</span>' : it.live ? '<span class="dur live">live</span>' : it.dur ? `<span class="dur">${esc(it.dur)}</span>` : "";
 	return `<a class="card" href="#/w/${esc(it.id)}">
-		<div class="thumbwrap"><img loading="lazy" src="${esc(it.thumb)}" alt="">${pct}<span class="dur">${esc(it.dur)}</span></div>
+		<div class="thumbwrap"><img loading="lazy" src="${esc(it.thumb)}" alt="">${pct}${badge}</div>
 		<p class="ctitle">${esc(it.title)}</p>
 		<p class="cmeta">${esc(meta)}</p>
 	</a>`;
@@ -106,6 +178,12 @@ function card(it) {
 function grid(items) {
 	if (!items.length) return '<p class="dim pad">nothing here.</p>';
 	return '<div class="grid">' + items.map(card).join("") + "</div>";
+}
+function shortCard(it) {
+	return `<a class="shortcard" href="#/w/${esc(it.id)}">
+		<div class="shortthumb"><img loading="lazy" src="${esc(it.thumb)}" alt=""><span class="dur">short</span></div>
+		<p class="ctitle">${esc(it.title)}</p>
+	</a>`;
 }
 function skeleton() {
 	let s = '<div class="grid">';
@@ -124,7 +202,11 @@ async function showTrending() {
 	view.innerHTML = skeleton();
 	try {
 		const d = await api("trending");
-		view.innerHTML = grid(d.items || []);
+		const items = store.settings.algo ? rankItems(d.items || []) : (d.items || []);
+		view.innerHTML = grid(items);
+		// warm the watch payloads he's most likely to open
+		const top = items.slice(0, 3);
+		if (top.length) idle(() => top.forEach((it, i) => setTimeout(() => prefetch("watch?v=" + it.id), i * 900)));
 	} catch (e) { errBox("trending won't load right now - the upstream is probably rate-limited."); }
 }
 
@@ -135,9 +217,75 @@ async function showSearch(q) {
 	try {
 		const d = await api("search?q=" + encodeURIComponent(q));
 		const items = d.items || [];
-		view.innerHTML = `<h2 class="sec pad" style="padding-bottom:0">results for "${esc(q)}"</h2>` +
+		view.innerHTML = `<h2 class="sec pad" style="padding-bottom:0">results for "${esc(q)}"</h2><div id="plrow"></div>` +
 			(items.length ? grid(items) : '<p class="dim pad">no videos matched that.</p>');
+		api("search-playlists?q=" + encodeURIComponent(q)).then((p) => {
+			const pls = (p && p.items) || [];
+			const el = document.getElementById("plrow");
+			if (!el || !pls.length) return;
+			el.innerHTML = '<div class="plrow">' + pls.map((pl) => `<a class="plcard" href="#/p/${esc(pl.id)}">
+				${pl.thumb ? `<img loading="lazy" src="${esc(pl.thumb)}" alt="">` : ""}
+				<span class="plinfo"><b>${esc(pl.title)}</b><span class="dim">playlist${pl.count ? " · " + pl.count + " videos" : ""}${pl.uploader ? " · " + esc(pl.uploader) : ""}</span></span>
+			</a>`).join("") + "</div>";
+		}).catch(() => {});
 	} catch (e) { errBox("search failed - give it another try."); }
+}
+
+async function showChannel(id) {
+	setTab("");
+	view.innerHTML = skeleton();
+	let d;
+	try { d = await api("channel?id=" + encodeURIComponent(id)); }
+	catch (e) { return errBox("couldn't load that channel."); }
+	const subbed = isSubbed(d.name);
+	const vids = d.videos || [];
+	const shorts = d.shorts || [];
+	view.innerHTML = `<div class="chhead">
+		${d.avatar ? `<img class="chavatar" src="${esc(d.avatar)}" alt="">` : ""}
+		<div class="chinfo">
+			<p class="chname">${esc(d.name)}</p>
+			${d.subs ? `<p class="dim" style="margin:2px 0 0">${esc(d.subs)}</p>` : ""}
+		</div>
+		<button class="plain subbtn${subbed ? " on" : ""}" id="subbtn">${subbed ? "subscribed" : "subscribe"}</button>
+	</div>
+	${vids.length ? `<div class="pad" style="padding-top:0"><button class="plain" id="playall">play all (${vids.length})</button></div>` : ""}
+	${d.description ? `<details class="desc pad" style="padding-top:0"><summary>about</summary><pre>${esc(d.description)}</pre></details>` : ""}
+	${shorts.length ? `<h2 class="sec">shorts</h2><div class="shortrow">${shorts.map(shortCard).join("")}</div>` : ""}
+	${vids.length ? '<h2 class="sec">videos</h2>' + grid(vids) : ""}
+	${!vids.length && !shorts.length ? '<p class="dim pad">no videos found on this channel.</p>' : ""}`;
+	document.getElementById("subbtn").addEventListener("click", () => {
+		toggleSub(d.name, d.id || "");
+		const b = document.getElementById("subbtn");
+		const on = isSubbed(d.name);
+		b.textContent = on ? "subscribed" : "subscribe";
+		b.classList.toggle("on", on);
+	});
+	const pa = document.getElementById("playall");
+	if (pa) pa.addEventListener("click", () => startQueue(d.name, vids));
+	if (vids.length) idle(() => setTimeout(() => prefetch("watch?v=" + vids[0].id), 600));
+}
+
+async function showPlaylist(id) {
+	setTab("");
+	view.innerHTML = skeleton();
+	let d;
+	try { d = await api("playlist?id=" + encodeURIComponent(id)); }
+	catch (e) { return errBox("couldn't load that playlist."); }
+	const vids = d.videos || [];
+	view.innerHTML = `<div class="pad">
+		<h2 class="sec" style="padding:0 0 6px">${esc(d.title)}</h2>
+		<p class="dim" style="margin:0 0 10px">playlist · ${vids.length} videos</p>
+		${vids.length ? `<button class="plain" id="playall">play all</button>` : ""}
+	</div>` + (vids.length
+		? '<div class="pllist">' + vids.map((it, i) => `<a class="plitem" href="#/w/${esc(it.id)}">
+			<span class="plnum">${i + 1}</span>
+			<img loading="lazy" src="${esc(it.thumb)}" alt="">
+			<span class="pliteminfo"><b>${esc(it.title)}</b><span class="dim">${esc(it.metaText || it.dur || "")}</span></span>
+		</a>`).join("") + "</div>"
+		: '<p class="dim pad">this playlist looks empty.</p>');
+	const pa = document.getElementById("playall");
+	if (pa) pa.addEventListener("click", () => startQueue(d.title, vids));
+	if (vids.length) idle(() => setTimeout(() => prefetch("watch?v=" + vids[0].id), 600));
 }
 
 async function showWatch(id) {
@@ -157,19 +305,23 @@ async function showWatch(id) {
 	const src = hasStreams ? d.streams[startIdx].src : "";
 	const metaBits = [fmtViews(d.views), d.uploaded ? d.uploaded.slice(0, 10) : "", d.likes ? d.likes + " likes" : ""].filter(Boolean).join(" · ");
 	const subbed = isSubbed(d.uploader);
+	const upLink = d.chId ? "#/c/" + encodeURIComponent(d.chId) : "#/s/" + encodeURIComponent(d.uploader);
+	const qIdx = queue ? queue.items.findIndex((x) => x.id === d.id) : -1;
+	const qChip = qIdx >= 0 ? `<p class="qchip">playing all · ${esc(queue.label)} · ${qIdx + 1}/${queue.items.length}</p>` : "";
 	view.innerHTML = `<div class="watch">
 		${hasStreams
-			? `<video class="player" id="player" controls playsinline preload="metadata" src="${esc(src)}"${d.thumb ? ` poster="${esc(d.thumb)}"` : ""}></video>`
+			? `<video class="player${d.vertical ? " tall" : ""}" id="player" controls playsinline preload="metadata" src="${esc(src)}"${d.thumb ? ` poster="${esc(d.thumb)}"` : ""}></video>`
 			: `<div class="note">${d.live ? "this one's live - live playback isn't supported yet." : "no playable stream for this video."}</div>`}
+		${qChip}
 		<p class="wtitle">${esc(d.title)}</p>
 		<div class="wsubrow">
-			<p class="wmeta" style="margin:0"><a class="uplink" href="#/s/${encodeURIComponent(d.uploader)}">${esc(d.uploader)}</a>${metaBits ? " · " + esc(metaBits) : ""}</p>
+			<p class="wmeta" style="margin:0"><a class="uplink" href="${upLink}">${esc(d.uploader)}</a>${metaBits ? " · " + esc(metaBits) : ""}</p>
 			<button class="plain subbtn${subbed ? " on" : ""}" id="subbtn">${subbed ? "subscribed" : "subscribe"}</button>
 		</div>
 		${hasStreams && d.streams.length > 1 ? `<div class="wrow"><label class="dim" for="qual">quality</label><select class="quality" id="qual">${d.streams.map((s, i) => `<option value="${i}"${i === startIdx ? " selected" : ""}>${esc(s.q)}</option>`).join("")}</select></div>` : ""}
 		${d.description ? `<details class="desc"><summary>description</summary><pre>${esc(d.description)}</pre></details>` : ""}
 		${d.related && d.related.length ? '<h2 class="sec">up next</h2>' : ""}
-	</div>` + grid(d.related || []);
+	</div>` + grid(store.settings.algo ? rankItems(d.related || []) : (d.related || []));
 	document.getElementById("subbtn").addEventListener("click", () => {
 		toggleSub(d.uploader, d.chId || "");
 		const b = document.getElementById("subbtn");
@@ -178,6 +330,12 @@ async function showWatch(id) {
 		b.classList.toggle("on", on);
 	});
 	if (hasStreams) wirePlayer(d, resume);
+	// warm the next things he's likely to tap
+	idle(() => {
+		const nxt = queueNext(d.id) || ((d.related || [])[0]);
+		if (nxt) prefetch("watch?v=" + nxt.id);
+		if (d.chId) setTimeout(() => prefetch("channel?id=" + encodeURIComponent(d.chId)), 900);
+	});
 }
 
 function wirePlayer(d, resume) {
@@ -195,6 +353,8 @@ function wirePlayer(d, resume) {
 	v.addEventListener("ended", () => {
 		setProgress(d.id, 0);
 		if (!store.settings.autoplayNext) return;
+		const qn = queueNext(d.id);
+		if (qn) { location.hash = "#/w/" + qn.id; return; }
 		const nxt = (d.related || [])[0];
 		if (nxt) location.hash = "#/w/" + nxt.id;
 	});
@@ -229,6 +389,7 @@ function showHistory() {
 }
 
 // -- subscriptions --------------------------------------------------------------
+function subLink(s) { return s.chId ? "#/c/" + encodeURIComponent(s.chId) : "#/s/" + encodeURIComponent(s.name); }
 async function showSubs() {
 	setTab("subs");
 	if (!store.subs.length) {
@@ -236,7 +397,7 @@ async function showSubs() {
 		return;
 	}
 	const rows = store.subs.map((s) => `<div class="subrow">
-		<a class="subname" href="#/s/${encodeURIComponent(s.name)}">${esc(s.name)}</a>
+		<a class="subname" href="${subLink(s)}">${esc(s.name)}</a>
 		<button class="plain" data-unsub="${esc(s.name)}">unsubscribe</button>
 	</div>`).join("");
 	view.innerHTML = `<h2 class="sec pad" style="padding-bottom:0">subscriptions</h2><div class="subs">${rows}</div><h2 class="sec pad" style="padding-bottom:0">latest from your channels</h2><div id="subsfeed">${skeleton()}</div>`;
@@ -273,6 +434,7 @@ function showSettings() {
 		<h2 class="sec" style="padding:0 0 6px">settings</h2>
 		<div class="setrow"><span>autoplay next video</span><input type="checkbox" id="set-autoplay"${s.autoplayNext ? " checked" : ""}></div>
 		<div class="setrow"><span>resume where i left off</span><input type="checkbox" id="set-resume"${s.resume ? " checked" : ""}></div>
+		<div class="setrow"><span>for-you ranking</span><input type="checkbox" id="set-algo"${s.algo ? " checked" : ""}></div>
 		<div class="setrow"><span>default quality</span><select class="quality" id="set-quality">
 			<option value="auto"${s.quality === "auto" ? " selected" : ""}>auto</option>
 			<option value="720p"${s.quality === "720p" ? " selected" : ""}>720p</option>
@@ -283,14 +445,26 @@ function showSettings() {
 	document.getElementById("set-autoplay").addEventListener("change", (e) => { store.settings.autoplayNext = e.target.checked; save(); });
 	document.getElementById("set-resume").addEventListener("change", (e) => { store.settings.resume = e.target.checked; save(); });
 	document.getElementById("set-quality").addEventListener("change", (e) => { store.settings.quality = e.target.value; save(); });
+	document.getElementById("set-algo").addEventListener("change", (e) => { store.settings.algo = e.target.checked; save(); });
 }
 
+// -- router ---------------------------------------------------------------------
+// paste a youtube link in the search box and we go straight there
+function routeUrl(raw) {
+	let m;
+	if ((m = /(?:shorts\/|watch\?[^\s]*v=|youtu\.be\/)([a-zA-Z0-9_-]{11})/.exec(raw))) return "#/w/" + m[1];
+	if ((m = /[?&]list=([a-zA-Z0-9_-]{10,80})/.exec(raw))) return "#/p/" + m[1];
+	if ((m = /channel\/([a-zA-Z0-9_-]{20,40})/.exec(raw))) return "#/c/" + m[1];
+	return null;
+}
 function route() {
 	const h = location.hash || "#/";
 	view.classList.remove("fade-in");
 	void view.offsetWidth;
 	view.classList.add("fade-in");
 	if (h.startsWith("#/w/")) return showWatch(h.slice(4).split("?")[0]);
+	if (h.startsWith("#/c/")) return showChannel(h.slice(4).split("?")[0]);
+	if (h.startsWith("#/p/")) return showPlaylist(h.slice(4).split("?")[0]);
 	if (h.startsWith("#/s/")) return showSearch(decodeURIComponent(h.slice(4)));
 	if (h === "#/history") return showHistory();
 	if (h === "#/subs") return showSubs();
@@ -301,7 +475,9 @@ function route() {
 document.getElementById("search").addEventListener("submit", (e) => {
 	e.preventDefault();
 	const q = qInput.value.trim();
-	if (q) location.hash = "#/s/" + encodeURIComponent(q);
+	if (!q) return;
+	const direct = routeUrl(q);
+	location.hash = direct || "#/s/" + encodeURIComponent(q);
 });
 window.addEventListener("hashchange", route);
 loadLocal();
