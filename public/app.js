@@ -349,7 +349,7 @@ async function showWatch(id) {
 	const qChip = qIdx >= 0 ? `<p class="qchip">playing all · ${esc(queue.label)} · ${qIdx + 1}/${queue.items.length}</p>` : "";
 	view.innerHTML = `<div class="watch">
 		${hasStreams
-			? `<video class="player${d.vertical ? " tall" : ""}" id="player" controls playsinline preload="metadata" src="${esc(src)}"${d.thumb ? ` poster="${esc(d.thumb)}"` : ""}></video>`
+			? `<video class="player${d.vertical ? " tall" : ""}" id="player" controls playsinline preload="metadata" crossorigin="anonymous" src="${esc(src)}"${d.thumb ? ` poster="${esc(d.thumb)}"` : ""}>${(d.captions || []).map((c, i) => `<track kind="captions" srclang="${esc(c.lang)}" label="${esc(c.label)}" src="${esc(c.src)}"${i === 0 ? " default" : ""}>`).join("")}</video>`
 			: `<div class="note">${d.live ? "this one's live - live playback isn't supported yet." : "no playable stream for this video."}</div>`}
 		${qChip}
 		<p class="wtitle">${esc(d.title)}</p>

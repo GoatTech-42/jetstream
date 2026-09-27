@@ -40,7 +40,7 @@ async function api(path) {
 }
 function b64(u) { return Buffer.from(String(u), "utf8").toString("base64url"); }
 function unb64(s) { try { return Buffer.from(String(s), "base64url").toString("utf8"); } catch { return null; } }
-const HOST_OK = /(^|\.)googlevideo\.com$|(^|\.)ytimg\.com$|(^|\.)ggpht\.com$|(^|\.)googleusercontent\.com$|(^|\.)piped\.private\.coffee$|(^|\.)adminforge\.de$|(^|\.)kavin\.rocks$/i;
+const HOST_OK = /(^|\.)googlevideo\.com$|(^|\.)youtube\.com$|(^|\.)ytimg\.com$|(^|\.)ggpht\.com$|(^|\.)googleusercontent\.com$|(^|\.)piped\.private\.coffee$|(^|\.)adminforge\.de$|(^|\.)kavin\.rocks$/i;
 function proxyHostOK(u) { try { return HOST_OK.test(new URL(u).hostname); } catch { return false; } }
 function fmtDur(sec) { sec = Math.max(0, Number(sec) || 0); return Math.floor(sec / 60) + ":" + String(Math.floor(sec) % 60).padStart(2, "0"); }
 // mqdefault (320x180) for grid cards - half the bytes of hqdefault, same shape.
@@ -103,6 +103,26 @@ async function innertubeBrowse(browseId) {
 		} catch (e) { lastErr = e; }
 	}
 	throw lastErr || new Error("browse failed");
+}
+// youtube signs timedtext urls over fmt, so we take srv3 xml and convert
+function srv3ToVtt(xml) {
+	const ts = (ms) => {
+		ms = Number(ms) || 0;
+		const h = Math.floor(ms / 3600000), m2 = Math.floor(ms / 60000) % 60, s2 = Math.floor(ms / 1000) % 60, mss = ms % 1000;
+		return String(h).padStart(2, "0") + ":" + String(m2).padStart(2, "0") + ":" + String(s2).padStart(2, "0") + "." + String(mss).padStart(3, "0");
+	};
+	const deq = (t) => t.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&#39;|&apos;/g, "'").replace(/&quot;/g, '"');
+	const rows = [];
+	const re = /<p[^>]*?\st="(\d+)"[^>]*?>([\s\S]*?)<\/p>/g;
+	let m;
+	while ((m = re.exec(xml))) {
+		const dm = /\sd="(\d+)"/.exec(m[0]);
+		const start = Number(m[1]);
+		const end = start + (dm ? Number(dm[1]) : 4000);
+		const text = deq(m[2].replace(/<[^>]+>/g, "")).trim();
+		if (text) rows.push(ts(start) + " --> " + ts(end) + "\n" + text + "\n");
+	}
+	return "WEBVTT\n\n" + rows.join("\n");
 }
 function walkAll(o, key, out) {
 	out = out || [];
@@ -211,6 +231,18 @@ async function watchViaInnertube(v) {
 		.sort((a, b) => (b.height || 0) - (a.height || 0))
 		.slice(0, 3)
 		.map((s) => ({ q: s.qualityLabel, src: "/api/jetstream/stream?u=" + b64(s.url) }));
+	// caption tracks - proxied through us as webvtt so the client never leaves origin
+	let captions = [];
+	try {
+		const tracks = (d.captions && d.captions.playerCaptionsTracklistRenderer && d.captions.playerCaptionsTracklistRenderer.captionTracks) || [];
+		captions = tracks.map((t) => ({
+			lang: t.languageCode || "",
+			label: (t.name && (t.name.simpleText || (t.name.runs || [])[0] && t.name.runs[0].text)) || t.languageCode || "",
+			auto: t.kind === "asr",
+			src: "/api/jetstream/cap?u=" + b64(t.baseUrl),
+		})).filter((c) => c.lang);
+		captions.sort((a, b) => (a.lang.startsWith("en") ? -1 : 1) - (b.lang.startsWith("en") ? -1 : 1) || (a.auto ? 1 : 0) - (b.auto ? 1 : 0));
+	} catch (e) {}
 	// hqdefault always exists (maxres 404s on plenty of videos)
 	const thumbUrl = "https://i.ytimg.com/vi/" + v + "/hqdefault.jpg";
 	// best-effort related via piped search on the uploader; fine if it fails
@@ -219,7 +251,7 @@ async function watchViaInnertube(v) {
 		const d2 = await api("/search?q=" + encodeURIComponent(vd.author || "") + "&filter=videos");
 		related = (d2 && Array.isArray(d2.items) ? d2.items : []).filter((x) => x && x.type === "stream" && x.url && !x.url.includes(v)).slice(0, 18).map(item);
 	} catch (e) {}
-	return { ok: true, id: v, title: vd.title || "", uploader: vd.author || "", chId: vd.channelId || "", thumb: "/api/jetstream/img?u=" + b64(thumbUrl), dur: fmtDur(vd.lengthSeconds), views: Number(vd.viewCount) || 0, likes: 0, uploaded: "", description: String(vd.shortDescription || "").slice(0, 2000), streams, related, live: !!vd.isLiveContent, vertical };
+	return { ok: true, id: v, title: vd.title || "", uploader: vd.author || "", chId: vd.channelId || "", thumb: "/api/jetstream/img?u=" + b64(thumbUrl), dur: fmtDur(vd.lengthSeconds), views: Number(vd.viewCount) || 0, likes: 0, uploaded: "", description: String(vd.shortDescription || "").slice(0, 2000), streams, related, live: !!vd.isLiveContent, vertical, captions };
 }
 
 export default async function handle(req, res, route, url, ctx) {
@@ -310,18 +342,24 @@ export default async function handle(req, res, route, url, ctx) {
 			if (!/^[a-zA-Z0-9_-]{11}$/.test(v)) return json(res, 400, { error: "bad video id" });
 			return json(res, 200, await cached("comments:" + v, 10 * 60 * 1000, () => commentsFor(v)), req);
 		}
-		if ((route === "stream" || route === "img") && req.method === "GET") {
+		if ((route === "stream" || route === "img" || route === "cap") && req.method === "GET") {
 			const u = unb64(url.searchParams.get("u") || "");
 			if (!u || !proxyHostOK(u)) return json(res, 400, { error: "bad url" });
 			const headers = { "user-agent": "ramjet-jetstream/1.2" };
 			if (route === "stream" && req.headers.range) headers.range = req.headers.range;
 			const r = await fetch(u, { headers, redirect: "follow", signal: AbortSignal.timeout(30000) });
-			const h = { "cache-control": route === "img" ? "public, max-age=86400" : "private, no-store" };
+			if (route === "cap") {
+				if (!r.ok) { res.writeHead(502); return res.end(); }
+				const xml = await r.text();
+				res.writeHead(200, { "content-type": "text/vtt; charset=utf-8", "cache-control": "public, max-age=86400" });
+				return res.end(srv3ToVtt(xml));
+			}
+			const h = { "cache-control": route === "stream" ? "private, no-store" : "public, max-age=86400" };
 			for (const k of ["content-type", "content-length", "content-range", "accept-ranges"]) {
 				const val = r.headers.get(k);
 				if (val) h[k] = val;
 			}
-			if (!h["content-type"]) h["content-type"] = route === "img" ? "image/jpeg" : "video/mp4";
+			if (!h["content-type"]) h["content-type"] = route === "img" ? "image/jpeg" : route === "cap" ? "text/vtt; charset=utf-8" : "video/mp4";
 			res.writeHead(r.status === 206 ? 206 : r.ok ? 200 : (r.status || 502), h);
 			if (!r.body) return res.end();
 			for await (const chunk of r.body) {
