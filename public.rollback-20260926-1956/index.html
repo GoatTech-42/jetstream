@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0b0c0e">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>jetstream - goattech</title>
+<meta name="description" content="jetstream: your own youtube frontend, inside ramjet.">
+<link rel="stylesheet" href="/jetstream/style.css?v=10">
+</head>
+<body>
+<header class="top">
+	<a class="brand" href="/" title="back to ramjet">
+		<svg class="mark" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path fill="var(--amber)" d="M11.6 39.6 L14.4 42.4 L4.7 50.7 L3.3 49.3 Z"/><path fill="var(--amber)" d="M20.6 48.6 L23.4 51.4 L15.7 57.7 L14.3 56.3 Z"/><path fill="var(--amber-deep)" d="M58 6 L12 22 L30 32 Z"/><path fill="var(--amber)" d="M58 6 L30 32 L40 50 Z"/></svg>
+		<span class="word">jet<em>stream</em></span>
+	</a>
+	<form id="search" autocomplete="off" spellcheck="false">
+		<input id="q" type="search" inputmode="search" placeholder="search" aria-label="Search">
+	</form>
+</header>
+<nav class="tabs">
+	<a href="#/" data-tab="foryou">for you</a>
+	<a href="#/trending" data-tab="home">trending</a>
+	<a href="#/subs" data-tab="subs">subs</a>
+	<a href="#/history" data-tab="history">history</a>
+	<a href="#/settings" data-tab="settings">settings</a>
+</nav>
+<main id="view"><p class="dim pad">loading...</p></main>
+<script src="/rjcrypto.js"></script>
+<script src="/jetstream/app.js?v=20"></script>
+</body>
+</html>

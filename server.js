@@ -71,9 +71,11 @@ function preferPlayable(items) {
 // -- innertube WEB search: youtube's own ranked order, continuation tokens, shorts filter --
 function searchItems(d) {
 	const out = [], shorts = [];
+	const seenIds = new Set(); // youtube repeats renderers across shelf sections - dup ids crash keyed each-blocks
 	for (const vr of walkAll(d, "videoRenderer")) {
 		const id = vr.videoId || "";
-		if (!/^[a-zA-Z0-9_-]{11}$/.test(id)) continue;
+		if (!/^[a-zA-Z0-9_-]{11}$/.test(id) || seenIds.has("v" + id)) continue;
+		seenIds.add("v" + id);
 		let live = false, dur = "";
 		if (vr.lengthText && vr.lengthText.simpleText) dur = vr.lengthText.simpleText;
 		else live = true; // no length text = live/upcoming
@@ -91,13 +93,53 @@ function searchItems(d) {
 	}
 	for (const sl of walkAll(d, "shortsLockupViewModel")) {
 		const m = /shorts-shelf-item-([a-zA-Z0-9_-]{11})/.exec(sl.entityId || "");
-		if (!m) continue;
+		if (!m || seenIds.has("s" + m[1])) continue;
+		seenIds.add("s" + m[1]);
 		const t = String(sl.accessibilityText || "").replace(/, [\d.,]+ ?[a-z]* views? - play Short.*$/i, "");
 		shorts.push({ id: m[1], title: t, short: true, thumb: thumbFor(m[1]) });
 	}
+	const channels = [], playlists = [];
+	for (const cr of walkAll(d, "channelRenderer")) {
+		const id = cr.channelId || "";
+		if (!id || seenIds.has("c" + id)) continue;
+		seenIds.add("c" + id);
+		const name = (cr.title && cr.title.simpleText) || "";
+		let avatar = "";
+		try { const a = cr.thumbnail.thumbnails.slice(-1)[0].url; avatar = a.startsWith("//") ? "https:" + a : a; } catch (e) {}
+		const st1 = (cr.subscriberCountText && cr.subscriberCountText.simpleText) || "";
+		const st2 = (cr.videoCountText && cr.videoCountText.simpleText) || "";
+		const subs = ([st1, st2].find((t) => /subscriber/i.test(t)) || "").replace(/ subscribers?$/i, "");
+		const desc = ((cr.descriptionSnippet && cr.descriptionSnippet.runs) || []).map((r) => r.text).join("");
+		channels.push({ id, name, avatar: avatar ? "/api/jetstream/img?u=" + b64(avatar) : "", subs, description: desc.slice(0, 120) });
+	}
+	for (const pr of walkAll(d, "playlistRenderer")) {
+		const id = pr.playlistId || "";
+		if (!id || seenIds.has("p" + id)) continue;
+		seenIds.add("p" + id);
+		const title = (pr.title && pr.title.simpleText) || "";
+		let thumb = "";
+		try { const t2 = pr.thumbnails[0].thumbnails.slice(-1)[0].url; thumb = t2.startsWith("//") ? "https:" + t2 : t2; } catch (e) {}
+		const count = ((pr.videoCountText && pr.videoCountText.runs) || [])[0];
+		const by = ((pr.longBylineText && pr.longBylineText.runs) || [])[0];
+		playlists.push({ id, title, thumb: thumb ? "/api/jetstream/img?u=" + b64(thumb) : "", count: String((count && count.text) || pr.videoCount || ""), uploader: (by && by.text) || "" });
+	}
+	for (const lv of walkAll(d, "lockupViewModel")) {
+		if (!/PLAYLIST/i.test(lv.contentType || "")) continue;
+		const id = lv.contentId || "";
+		if (!id || seenIds.has("p" + id)) continue;
+		seenIds.add("p" + id);
+		const meta = (lv.metadata && lv.metadata.lockupMetadataViewModel) || {};
+		const title = (meta.title && meta.title.content) || "";
+		let uploader = "";
+		try { uploader = meta.metadata.contentMetadataViewModel.metadataRows[0].metadataParts[0].text.content || ""; } catch (e) {}
+		let thumb = "", count = "";
+		try { const srcs = lv.contentImage.collectionThumbnailViewModel.primaryThumbnail.thumbnailViewModel.image.sources; thumb = srcs[srcs.length - 1].url.split("?")[0]; } catch (e) {}
+		try { count = (lv.contentImage.collectionThumbnailViewModel.primaryThumbnail.thumbnailViewModel.overlays[0].thumbnailOverlayBadgeViewModel.thumbnailBadges[0].thumbnailBadgeViewModel.text || "").replace(/ videos?$/i, ""); } catch (e) {}
+		playlists.push({ id, title, thumb: thumb ? "/api/jetstream/img?u=" + b64(thumb) : "", count, uploader });
+	}
 	let cont = "";
 	for (const c of walkAll(d, "continuationCommand")) { if (c && c.token) { cont = c.token; break; } }
-	return { items: out, shorts, cont };
+	return { items: out, shorts, channels, playlists, cont };
 }
 async function innertubeSearch(body) {
 	let lastErr = null;
@@ -424,12 +466,29 @@ export default async function handle(req, res, route, url, ctx) {
 		if (route === "search" && req.method === "GET") {
 			const q = (url.searchParams.get("q") || "").trim();
 			const cont = (url.searchParams.get("cont") || "").trim();
-			const wantShorts = url.searchParams.get("filter") === "shorts";
+			const filt = url.searchParams.get("filter") || "";
+			const wantShorts = filt === "shorts";
+			const wantAll = filt === "all";
+			const wantChannels = filt === "channels";
+			const wantPlaylists = filt === "playlists";
 			if (!q && !cont) return json(res, 400, { error: "missing q" });
 			try {
-				const body = cont ? { continuation: cont } : { query: q, params: wantShorts ? "EgIYAQ==" : "EgIQAQ==" };
-				const d = await cached("ytsearch:" + (cont || q + ":" + (wantShorts ? "s" : "v")), 10 * 60 * 1000, () => innertubeSearch(body));
+				const params = wantAll ? "" : wantShorts ? "EgIYAQ==" : wantChannels ? "EgIQAg==" : wantPlaylists ? "EgIQAw==" : "EgIQAQ==";
+				const body = cont ? { continuation: cont } : { query: q, ...(params ? { params } : {}) };
+				const d = await cached("ytsearch:" + (cont || q + ":" + (params || "a")), 10 * 60 * 1000, () => innertubeSearch(body));
 				const r = searchItems(d);
+				if (wantChannels) return json(res, 200, { ok: true, items: r.channels.slice(0, 12), continuation: r.cont }, req);
+				if (wantPlaylists) return json(res, 200, { ok: true, items: r.playlists.slice(0, 12), continuation: r.cont }, req);
+				if (wantAll) {
+					let pls = r.playlists;
+					if (!cont) {
+						try {
+							const d2 = await cached("ytsearch:" + q + ":EgIQAw==", 10 * 60 * 1000, () => innertubeSearch({ query: q, params: "EgIQAw==" }));
+							pls = searchItems(d2).playlists;
+						} catch (e) {}
+					}
+					return json(res, 200, { ok: true, videos: r.items.slice(0, 8), channels: r.channels.slice(0, 3), playlists: pls.slice(0, 3), shorts: r.shorts.slice(0, 8), continuation: r.cont }, req);
+				}
 				return json(res, 200, { ok: true, items: wantShorts ? r.shorts : r.items, continuation: r.cont }, req);
 			} catch (e) {
 				if (cont || wantShorts) throw e;
