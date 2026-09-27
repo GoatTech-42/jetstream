@@ -713,6 +713,28 @@ export default async function handle(req, res, route, url, ctx) {
 			if (!/^[a-zA-Z0-9_-]{11}$/.test(v)) return json(res, 400, { error: "bad video id" });
 			return json(res, 200, await cached("comments:" + v, 10 * 60 * 1000, () => commentsFor(v)), req);
 		}
+		if (route === "austream" && req.method === "GET") {
+			// audius stream proxy (amp): the content nodes sit behind cloudflare browser
+			// checks that reject media-element loads - server-to-server sails through.
+			const id = (url.searchParams.get("id") || "").trim();
+			if (!/^[A-Za-z0-9]{1,24}$/.test(id)) return json(res, 400, { error: "bad id" }, req);
+			const headers = { "user-agent": "ramjet-amp/1.0" };
+			if (req.headers.range) headers.range = req.headers.range;
+			const r = await fetch("https://discoveryprovider.audius.co/v1/tracks/" + id + "/stream?app_name=goattech-amp", { headers, redirect: "follow", signal: AbortSignal.timeout(30000) });
+			if (!r.ok && r.status !== 206) { res.writeHead(502); return res.end(); }
+			const h = { "cache-control": "public, max-age=3600" };
+			for (const k of ["content-type", "content-length", "content-range", "accept-ranges"]) {
+				const val = r.headers.get(k);
+				if (val) h[k] = val;
+			}
+			if (!h["content-type"]) h["content-type"] = "audio/mpeg";
+			res.writeHead(r.status === 206 ? 206 : 200, h);
+			if (!r.body) return res.end();
+			for await (const chunk of r.body) {
+				if (!res.write(chunk)) await new Promise((d2) => res.once("drain", d2));
+			}
+			return res.end();
+		}
 		if ((route === "stream" || route === "img" || route === "cap") && req.method === "GET") {
 			const u = unb64(url.searchParams.get("u") || "");
 			if (!u || !proxyHostOK(u)) return json(res, 400, { error: "bad url" });
