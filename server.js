@@ -45,12 +45,15 @@ function proxyHostOK(u) { try { return HOST_OK.test(new URL(u).hostname); } catc
 function fmtDur(sec) { sec = Math.max(0, Number(sec) || 0); return Math.floor(sec / 60) + ":" + String(Math.floor(sec) % 60).padStart(2, "0"); }
 // mqdefault (320x180) for grid cards - half the bytes of hqdefault, same shape.
 function thumbFor(id) { return "/api/jetstream/img?u=" + b64("https://i.ytimg.com/vi/" + id + "/mqdefault.jpg"); }
-function item(it) {
+function item(it, liveByDuration = true) {
 	const id = (it.url || "").split("v=").pop();
 	const chId = (it.uploaderUrl || "").split("/channel/").pop() || "";
 	const secs = Number(it.duration) || 0;
 	// piped uses duration -1 for live streams (rendered 0:00 before) - badge them
-	const live = it.duration === -1 || it.livestream === true;
+	// liveByDuration=false when the upstream's extractor is broken and returns -1 on
+	// everything (Sep 26 incident): then only the explicit flag marks live, so a
+	// broken parser can't blank the whole feed.
+	const live = it.livestream === true || (liveByDuration && it.duration === -1);
 	return { id, title: it.title || "", thumb: thumbFor(id), dur: secs > 0 ? fmtDur(secs) : "", uploader: it.uploaderName || it.uploader || "", chId, views: it.views || it.viewCount || 0, live };
 }
 // live streams can't play through jetstream - hide them everywhere (Luke's call, v1.6)
@@ -336,7 +339,7 @@ export default async function handle(req, res, route, url, ctx) {
 		if (route === "trending" && req.method === "GET") {
 			// blend several regions - one region's trending is ~20 vids and can be
 			// wall-to-wall live (filtered here), so a single region can come back empty
-			const d = await cached("trending:blend", 10 * 60 * 1000, async () => {
+			const blend = async () => {
 				const regions = ["US", "GB", "CA", "AU", "DE", "IN"];
 				const all = await Promise.allSettled(regions.map((r) => api("/trending?region=" + r)));
 				const seen = new Set(), out = [];
@@ -349,8 +352,27 @@ export default async function handle(req, res, route, url, ctx) {
 					}
 				}
 				return out;
-			});
-			return json(res, 200, { ok: true, items: preferPlayable((Array.isArray(d) ? d : []).filter((x) => x && x.url).map(item)) }, req);
+			};
+			// a sparse blend means an upstream blip, not a quiet day - never cache it
+			// for the full ttl or the feed sits empty for 10 minutes. retry once, and
+			// only cache when the blend actually has content.
+			const hit = apiCache.get("trending:blend");
+			let d = hit && Date.now() - hit.ts < 10 * 60 * 1000 ? hit.data : null;
+			if (!Array.isArray(d)) {
+				d = await blend();
+				if (d.length < 8) {
+					await new Promise((r) => setTimeout(r, 1500));
+					const again = await blend();
+					if (again.length > d.length) d = again;
+				}
+				if (d.length >= 8) {
+					apiCache.set("trending:blend", { data: d, ts: Date.now() });
+					if (apiCache.size > API_CACHE_MAX) apiCache.delete(apiCache.keys().next().value);
+				}
+			}
+			const arr = (Array.isArray(d) ? d : []).filter((x) => x && x.url);
+			const liveByDuration = arr.length === 0 || arr.filter((x) => x.duration === -1).length * 2 < arr.length;
+			return json(res, 200, { ok: true, items: preferPlayable(arr.map((x) => item(x, liveByDuration))) }, req);
 		}
 		if (route === "search" && req.method === "GET") {
 			const q = (url.searchParams.get("q") || "").trim();
