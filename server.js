@@ -375,7 +375,24 @@ export default async function handle(req, res, route, url, ctx) {
 			}
 			const arr = (Array.isArray(d) ? d : []).filter((x) => x && x.url);
 			const liveByDuration = arr.length === 0 || arr.filter((x) => x.duration === -1).length * 2 < arr.length;
-			return json(res, 200, { ok: true, items: preferPlayable(arr.map((x) => item(x, liveByDuration))) }, req);
+			let items = preferPlayable(arr.map((x) => item(x, liveByDuration)));
+			// Luke 9/26: trending can be wall-to-wall livestreams (saturday nights),
+			// and filtering leaves an empty row. top up from youtube's own trending
+			// browse - the innertube parser drops lives via the lengthText rule, so
+			// only playable videos backfill.
+			if (items.length < 12) {
+				try {
+					const yt = await cached("yttrending", 10 * 60 * 1000, () => innertubeBrowse("FEtrending"));
+					const extra = searchItems(yt).items;
+					const have = new Set(items.map((x) => x.id));
+					for (const e of extra) {
+						if (items.length >= 30 || have.has(e.id)) continue;
+						have.add(e.id);
+						items.push(e);
+					}
+				} catch (e) {}
+			}
+			return json(res, 200, { ok: true, items }, req);
 		}
 		if (route === "search" && req.method === "GET") {
 			const q = (url.searchParams.get("q") || "").trim();
