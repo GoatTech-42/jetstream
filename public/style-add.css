@@ -57,3 +57,10 @@
 .desc pre, .desc .cmts { padding: 0 14px 12px; }
 .wrow { display: flex; align-items: center; gap: 10px; margin: 10px 0; }
 .quality { background: var(--panel); color: var(--text); border: 1px solid var(--edge); border-radius: 9px; padding: 7px 10px; font: inherit; }
+
+/* channel header: real layout, sane avatar */
+.chhead { display: flex; align-items: center; gap: 14px; padding: 14px 16px 4px; }
+.chavatar { width: 56px; height: 56px; border-radius: 50%; object-fit: cover; flex: none; background: #1c1f24; }
+.chinfo { flex: 1; min-width: 0; }
+.chname { margin: 0; font-size: 20px; font-weight: 700; }
+.chhead .subbtn { flex: none; }
