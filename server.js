@@ -713,6 +713,27 @@ export default async function handle(req, res, route, url, ctx) {
 			if (!/^[a-zA-Z0-9_-]{11}$/.test(v)) return json(res, 400, { error: "bad video id" });
 			return json(res, 200, await cached("comments:" + v, 10 * 60 * 1000, () => commentsFor(v)), req);
 		}
+		if (route === "auimg" && req.method === "GET") {
+			// audius artwork: content nodes are arbitrary hosts, so validate the
+			// request shape instead - https, no creds, /content/<cid>/<size>.<ext>
+			const u = unb64(url.searchParams.get("u") || "");
+			let pu = null;
+			try { pu = new URL(u); } catch (e) {}
+			if (!pu || pu.protocol !== "https:" || pu.username || pu.password || !/^\/content\/[A-Za-z0-9]{20,64}\/[0-9]{2,4}x[0-9]{2,4}\.(jpg|jpeg|png|webp)$/i.test(pu.pathname)) {
+				return json(res, 400, { error: "bad url" }, req);
+			}
+			const r = await fetch(u, { headers: { "user-agent": "ramjet-amp/1.0" }, redirect: "follow", signal: AbortSignal.timeout(15000) });
+			if (!r.ok) { res.writeHead(502); return res.end(); }
+			const h = { "cache-control": "public, max-age=86400", "content-type": r.headers.get("content-type") || "image/jpeg" };
+			const cl = r.headers.get("content-length");
+			if (cl) h["content-length"] = cl;
+			res.writeHead(200, h);
+			if (!r.body) return res.end();
+			for await (const chunk of r.body) {
+				if (!res.write(chunk)) await new Promise((d2) => res.once("drain", d2));
+			}
+			return res.end();
+		}
 		if (route === "austream" && req.method === "GET") {
 			// audius stream proxy (amp): the content nodes sit behind cloudflare browser
 			// checks that reject media-element loads - server-to-server sails through.
