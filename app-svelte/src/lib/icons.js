@@ -1,0 +1,15 @@
+export const ICON = {
+	play: '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M8 5v14l11-7z"/></svg>',
+	pause: '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>',
+	vol: '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M3 9v6h4l5 5V4L7 9H3z"/><path d="M16 8a5 5 0 0 1 0 8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
+	mute: '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M3 9v6h4l5 5V4L7 9H3z"/><path d="M16 9l5 6M21 9l-5 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"/></svg>',
+	cc: '<svg viewBox="0 0 24 24"><rect x="2" y="5" width="20" height="14" rx="3" fill="none" stroke="currentColor" stroke-width="2"/><path d="M10.5 10.5c-.6-.6-2.5-.8-3.3.3-.8 1.2-.8 3.2 0 4.4.8 1.1 2.7.9 3.3.3M18 10.5c-.6-.6-2.5-.8-3.3.3-.8 1.2-.8 3.2 0 4.4.8 1.1 2.7.9 3.3.3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>',
+	fs: '<svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
+	pip: '<svg viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="16" rx="3" fill="none" stroke="currentColor" stroke-width="2"/><rect x="12" y="12" width="7" height="5" rx="1.5" fill="currentColor"/></svg>',
+	gear: '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M19.4 13c.04-.32.06-.66.06-1s-.02-.68-.06-1l2.11-1.65a.5.5 0 0 0 .12-.64l-2-3.46a.5.5 0 0 0-.61-.22l-2.49 1a7.3 7.3 0 0 0-1.73-1l-.38-2.65A.5.5 0 0 0 13.93 3h-4a.5.5 0 0 0-.5.42l-.38 2.65a7.3 7.3 0 0 0-1.73 1l-2.49-1a.5.5 0 0 0-.61.22l-2 3.46a.5.5 0 0 0 .12.64L4.45 11c-.04.32-.06.66-.06 1s.02.68.06 1l-2.11 1.65a.5.5 0 0 0-.12.64l2 3.46c.14.24.42.34.61.22l2.49-1c.52.4 1.1.74 1.73 1l.38 2.65c.04.24.25.42.5.42h4c.25 0 .46-.18.5-.42l.38-2.65a7.3 7.3 0 0 0 1.73-1l2.49 1c.19.12.47.02.61-.22l2-3.46a.5.5 0 0 0-.12-.64L19.4 13zM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7z"/></svg>',
+	home: '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M12 3 2 12h3v8h6v-6h2v6h6v-8h3L12 3z"/></svg>',
+	fire: '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M13.5 1.5s.75 2.61-.75 5.25c-1.2 2.1-3 3.15-3 5.25a5.25 5.25 0 0 0 10.5 0c0-2.02-1.05-3.63-2.25-5.25-.45 1.2-1.2 1.95-2.25 2.25.75-2.25-.3-6.3-2.25-7.5zM12 22.5A6.75 6.75 0 0 1 5.25 15.75c0-2.9 1.95-4.72 3.38-6.22C7.2 11.4 6.75 13.05 6.75 14.25c.9-.6 1.8-1.05 2.62-1.35C7.5 15.75 8.25 18 9.75 19.5c1.05 1.05 2.4 1.5 2.25 3z"/></svg>',
+	subs: '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M20 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2zM4 8h16v2H4V8zm0 4h7v6H4v-6z"/></svg>',
+	clock: '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm1 10.59 3.8 3.8-1.4 1.4L11 13.41V7h2v5.59z"/></svg>',
+	search: '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M15.5 14h-.79l-.28-.27a6.5 6.5 0 1 0-.7.7l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0A4.5 4.5 0 1 1 14 9.5 4.5 4.5 0 0 1 9.5 14z"/></svg>',
+};
