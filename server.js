@@ -334,7 +334,22 @@ export default async function handle(req, res, route, url, ctx) {
 	if (!ctx.user) { json(res, 401, { error: "no session" }); return; }
 	try {
 		if (route === "trending" && req.method === "GET") {
-			const d = await cachedApi("/trending?region=US", 10 * 60 * 1000);
+			// blend several regions - one region's trending is ~20 vids and can be
+			// wall-to-wall live (filtered here), so a single region can come back empty
+			const d = await cached("trending:blend", 10 * 60 * 1000, async () => {
+				const regions = ["US", "GB", "CA", "AU", "DE", "IN"];
+				const all = await Promise.allSettled(regions.map((r) => api("/trending?region=" + r)));
+				const seen = new Set(), out = [];
+				for (const r of all) {
+					if (r.status !== "fulfilled" || !Array.isArray(r.value)) continue;
+					for (const x of r.value) {
+						if (!x || !x.url || seen.has(x.url)) continue;
+						seen.add(x.url);
+						out.push(x);
+					}
+				}
+				return out;
+			});
 			return json(res, 200, { ok: true, items: preferPlayable((Array.isArray(d) ? d : []).filter((x) => x && x.url).map(item)) }, req);
 		}
 		if (route === "search" && req.method === "GET") {

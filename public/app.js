@@ -255,8 +255,37 @@ async function showForYou() {
 		return;
 	}
 	const items = store.settings.algo ? rankItems(pool) : pool;
-	view.innerHTML = grid(items);
+	view.innerHTML = grid(items) + '<div id="fymore"></div>';
 	idle(() => items.slice(0, 3).forEach((it, i) => setTimeout(() => prefetch("watch?v=" + it.id), i * 900)));
+	// endless feed: as he nears the bottom, fold in related of his next watches
+	// (deduped, watched sunk) so the feed never runs dry
+	const fyEl = document.getElementById("fymore");
+	const gridEl = view.querySelector(".grid");
+	if (fyEl && gridEl) {
+		let expanding = 0, busy = false;
+		const have = new Set(items.map((x) => x.id));
+		const fyObs = new IntersectionObserver(async (ents) => {
+			if (busy || expanding >= 12 || !ents.some((x) => x.isIntersecting)) return;
+			const nextHist = store.history.slice(2 + expanding);
+			if (!nextHist.length) { fyObs.disconnect(); return; }
+			busy = true; expanding++;
+			try {
+				const fresh = [];
+				for (const h of nextHist.slice(0, 2)) {
+					try { const w = await api("watch?v=" + encodeURIComponent(h.id)); fresh.push(...(w.related || [])); } catch (e) {}
+				}
+				const add = fresh.filter((it) => it && it.id && !watched.has(it.id) && !have.has(it.id));
+				add.forEach((it) => have.add(it.id));
+				if (add.length) {
+					const ranked = store.settings.algo ? rankItems(add) : add;
+					gridEl.insertAdjacentHTML("beforeend", ranked.map(card).join(""));
+				}
+			} catch (e) {}
+			busy = false;
+			if (expanding >= 12) fyObs.disconnect();
+		}, { rootMargin: "900px" });
+		fyObs.observe(fyEl);
+	}
 }
 
 async function showTrending() {
