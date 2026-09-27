@@ -132,11 +132,33 @@ async function innertube(videoId) {
 			});
 			if (!r.ok) { lastErr = new Error("innertube " + r.status); continue; }
 			const d = await r.json();
-			if (d.playabilityStatus && d.playabilityStatus.status !== "OK") { lastErr = new Error("unplayable: " + d.playabilityStatus.status); continue; }
+			if (d.playabilityStatus && d.playabilityStatus.status !== "OK") {
+				// age-gated videos sometimes still play through the embed client (9/26
+				// research: ANDROID/WEB/MWEB all login-wall age gates; embed works when
+				// the owner left embedding on). one cheap retry before giving up.
+				if (d.playabilityStatus.status === "LOGIN_REQUIRED") {
+					const emb = await innertubeEmbed(videoId, key).catch(() => null);
+					if (emb) return emb;
+				}
+				lastErr = new Error("unplayable: " + d.playabilityStatus.status + (d.playabilityStatus.reason ? ": " + d.playabilityStatus.reason : ""));
+				continue;
+			}
 			return d;
 		} catch (e) { lastErr = e; }
 	}
 	throw lastErr || new Error("innertube failed");
+}
+async function innertubeEmbed(videoId, key) {
+	const r = await fetch("https://www.youtube.com/youtubei/v1/player?key=" + key, {
+		method: "POST",
+		headers: { "content-type": "application/json", "user-agent": WEB_UA },
+		body: JSON.stringify({ context: { client: { clientName: "WEB_EMBEDDED_PLAYER", clientVersion: "1.20240925.01.00", hl: "en", clientScreen: "EMBED" }, thirdParty: { embedUrl: "https://www.youtube.com/" } }, contentCheckOk: true, racyCheckOk: true, videoId }),
+		signal: AbortSignal.timeout(12000),
+	});
+	if (!r.ok) return null;
+	const d = await r.json();
+	if (d.playabilityStatus && d.playabilityStatus.status === "OK" && d.streamingData) return d;
+	return null;
 }
 // channel + playlist pages come from the WEB innertube browse endpoint.
 async function innertubeBrowse(browseId, cont, params) {
@@ -594,6 +616,7 @@ export default async function handle(req, res, route, url, ctx) {
 		if (route === "watch" && req.method === "GET") {
 			const v = (url.searchParams.get("v") || "").trim();
 			if (!/^[a-zA-Z0-9_-]{11}$/.test(v)) return json(res, 400, { error: "bad video id" });
+			let watchErr = null;
 			try {
 				if (url.searchParams.has("fresh")) {
 					const d = await watchViaInnertube(v);
@@ -601,8 +624,15 @@ export default async function handle(req, res, route, url, ctx) {
 					return json(res, 200, d, req);
 				}
 				return json(res, 200, await cached("watch:" + v, 5 * 60 * 1000, () => watchViaInnertube(v)), req);
-			} catch (e) {}
-			const d = await cachedApi("/streams/" + v, 5 * 60 * 1000);
+			} catch (e) { watchErr = e; }
+			let d;
+			try {
+				d = await cachedApi("/streams/" + v, 5 * 60 * 1000);
+			} catch (e2) {
+				const m = watchErr && /unplayable: ([A-Z_]+): (.+)/.exec(String(watchErr.message || ""));
+				if (m) return json(res, 422, { error: m[2], status: m[1] });
+				throw e2;
+			}
 			const streams = (d.videoStreams || [])
 				.filter((s) => s && s.url && s.videoOnly === false && /\d+p/.test(s.quality || ""))
 				.sort((a, b) => (parseInt(b.quality) || 0) - (parseInt(a.quality) || 0))
