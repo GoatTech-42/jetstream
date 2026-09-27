@@ -53,7 +53,10 @@ function item(it, liveByDuration = true) {
 	// liveByDuration=false when the upstream's extractor is broken and returns -1 on
 	// everything (Sep 26 incident): then only the explicit flag marks live, so a
 	// broken parser can't blank the whole feed.
-	const live = it.livestream === true || (liveByDuration && it.duration === -1);
+	// uploaded<0 is the duration-independent live signal (Luke 9/26: lives still
+	// leaking): piped stamps live/premiere items uploaded:-1 even while the
+	// extractor breakage zeroes every duration - verified against live upstream.
+	const live = it.livestream === true || it.uploaded < 0 || (liveByDuration && it.duration === -1);
 	return { id, title: it.title || "", thumb: thumbFor(id), dur: secs > 0 ? fmtDur(secs) : "", uploader: it.uploaderName || it.uploader || "", chId, views: it.views || it.viewCount || 0, live };
 }
 // live streams can't play through jetstream - hide them everywhere (Luke's call, v1.6)
